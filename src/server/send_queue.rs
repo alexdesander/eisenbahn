@@ -20,7 +20,7 @@ pub enum SendError {
 }
 
 #[derive(Clone)]
-pub struct SendQueue {
+pub(crate) struct SendQueue {
     inner: Arc<Mutex<SendQueueInner>>,
 }
 
@@ -46,6 +46,10 @@ impl SendQueue {
 
     pub fn send(&self, addr: SocketAddr, to_send: ToSend) -> Result<(), SendError> {
         self.inner.lock().unwrap().send(addr, to_send)
+    }
+
+    pub fn blocking_send(&self, addr: SocketAddr, to_send: ToSend) -> Result<(), SendError> {
+        self.inner.lock().unwrap().blocking_send(addr, to_send)
     }
 }
 
@@ -93,6 +97,22 @@ impl SendQueueInner {
         match self.send_queue_txs.get(&addr).unwrap().try_send(to_send) {
             Ok(_) => Ok(()),
             Err(TrySendError::Full(_)) => Err(SendError::SendQueueFull),
+            Err(_) => Err(SendError::ServerShutdown),
+        }
+    }
+
+    /// This will never return SendError::SendQueueFull
+    fn blocking_send(&mut self, addr: SocketAddr, to_send: ToSend) -> Result<(), SendError> {
+        match self.has_pending.binary_search(&addr) {
+            Ok(_) => {}
+            Err(i) => {
+                self.has_pending.insert(i, addr);
+                // TODO: Fix waking and stuff
+                let _ = self.waker.wake();
+            }
+        }
+        match self.send_queue_txs.get(&addr).unwrap().send(to_send) {
+            Ok(_) => Ok(()),
             Err(_) => Err(SendError::ServerShutdown),
         }
     }

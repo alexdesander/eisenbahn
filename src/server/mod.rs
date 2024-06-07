@@ -26,7 +26,7 @@ use crate::common::{constants::*, encryption::auth::AuthenticationKind};
 pub mod auth;
 pub mod builder;
 mod con;
-mod send_queue;
+pub mod send_queue;
 
 pub enum ServerCmd {
     SendConnectionResponse {

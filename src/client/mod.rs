@@ -111,7 +111,7 @@ impl ClientState {
             reliable: ReliableChannels::new(encryption),
             ack_manager: AckManager::new(),
             has_ack_event_queued: false,
-            ack_only_delay: Duration::from_millis(1),
+            ack_only_delay: Duration::from_millis(100),
             to_send_rx,
             received_tx,
             is_sending: false,

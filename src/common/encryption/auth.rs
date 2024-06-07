@@ -68,7 +68,7 @@ impl AuthenticationPassword {
 
 #[derive(Debug)]
 pub struct AuthenticationCA {
-    pub(crate) ticket: [u8; 32],
+    pub ticket: [u8; 32],
 }
 
 impl AuthenticationCA {

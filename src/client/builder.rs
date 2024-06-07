@@ -2,13 +2,13 @@ use std::{
     io::{self, Read, Write},
     net::{SocketAddr, UdpSocket},
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use crossbeam_channel::TryRecvError;
+use crossbeam_channel::{TryRecvError, TrySendError};
 use ed25519_dalek::{ed25519::signature::Signer, VerifyingKey};
 use mio::{Poll, Waker};
 use rand::{thread_rng, Rng};
@@ -498,10 +498,10 @@ pub enum RecvError {
     ClientStopped,
 }
 
+#[derive(Clone)]
 pub struct EisenbahnClient {
-    network_thread: Option<JoinHandle<Result<(), std::io::Error>>>,
+    network_thread: Arc<Mutex<Option<JoinHandle<Result<(), std::io::Error>>>>>,
     client_cmds: crossbeam_channel::Sender<ClientCmd>,
-    send_queue_max_pending_messages: usize,
     waker: Arc<Waker>,
     to_send_tx: crossbeam_channel::Sender<ToSend>,
     received_rx: crossbeam_channel::Receiver<Received>,
@@ -515,7 +515,7 @@ impl EisenbahnClient {
     ) -> Self {
         socket.set_nonblocking(true).unwrap();
         let (client_cmds_tx, client_cmds_rx) = crossbeam_channel::unbounded();
-        let (to_send_tx, to_send_rx) = crossbeam_channel::unbounded();
+        let (to_send_tx, to_send_rx) = crossbeam_channel::bounded(send_queue_max_pending_messages);
         let (received_tx, received_rx) = crossbeam_channel::unbounded();
 
         let poll = Poll::new().unwrap();
@@ -535,9 +535,8 @@ impl EisenbahnClient {
         });
 
         Self {
-            network_thread: Some(network_thread),
+            network_thread:Arc::new(Mutex::new( Some(network_thread))),
             client_cmds: client_cmds_tx,
-            send_queue_max_pending_messages,
             waker,
             to_send_tx,
             received_rx,
@@ -547,26 +546,42 @@ impl EisenbahnClient {
     pub fn shutdown(&mut self) {
         let _ = self.client_cmds.send(ClientCmd::Shutdown);
         let _ = self.waker.wake();
-        if let Some(handle) = self.network_thread.take() {
+        if let Some(handle) = self.network_thread.lock().unwrap().take() {
             let _ = handle.join();
         }
     }
 
     pub fn send(&self, to_send: ToSend) -> Result<(), SendError> {
-        if self.to_send_tx.len() >= self.send_queue_max_pending_messages {
-            return Err(SendError::SendQueueFull);
+        match self.to_send_tx.try_send(to_send) {
+            Ok(_) => {}
+            Err(TrySendError::Full(_)) => return Err(SendError::SendQueueFull),
+            _ => return Err(SendError::ClientStopped),
         }
-        self.to_send_tx
-            .send(to_send)
-            .map_err(|_| SendError::ClientStopped)?;
         let _ = self.waker.wake();
         Ok(())
     }
 
-    pub fn try_recv(&self) -> Result<Option<Received>, RecvError> {
+    /// This will never return SendError::SendQueueFull
+    pub fn blocking_send(&self, to_send: ToSend) -> Result<(), SendError> {
+        match self.to_send_tx.send(to_send) {
+            Ok(_) => {}
+            _ => return Err(SendError::ClientStopped),
+        }
+        let _ = self.waker.wake();
+        Ok(())
+    }
+
+    pub fn recv(&self) -> Result<Option<Received>, RecvError> {
         match self.received_rx.try_recv() {
             Ok(msg) => Ok(Some(msg)),
             Err(TryRecvError::Empty) => Ok(None),
+            Err(_) => Err(RecvError::ClientStopped),
+        }
+    }
+
+    pub fn blocking_recv(&self) -> Result<Received, RecvError> {
+        match self.received_rx.recv() {
+            Ok(msg) => Ok(msg),
             Err(_) => Err(RecvError::ClientStopped),
         }
     }

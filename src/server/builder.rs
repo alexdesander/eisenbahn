@@ -254,7 +254,7 @@ impl EisenbahnServer {
         }
     }
 
-    pub fn try_recv(&self) -> Result<Option<(SocketAddr, Received)>, ReceiveError> {
+    pub fn recv(&self) -> Result<Option<(SocketAddr, Received)>, ReceiveError> {
         match self.recv_queue_rx.try_recv() {
             Ok(data) => Ok(Some(data)),
             Err(crossbeam_channel::TryRecvError::Empty) => Ok(None),
@@ -262,7 +262,19 @@ impl EisenbahnServer {
         }
     }
 
+    /// Blocks until a packet is received
+    pub fn blocking_recv(&self) -> Result<(SocketAddr, Received), ReceiveError> {
+        match self.recv_queue_rx.recv() {
+            Ok(data) => Ok(data),
+            Err(crossbeam_channel::RecvError) => Err(ReceiveError::ServerStopped),
+        }
+    }
+
     pub fn send(&self, addr: SocketAddr, to_send: ToSend) -> Result<(), SendError> {
         self.send_queue.send(addr, to_send)
+    }
+
+    pub fn blocking_send(&self, addr: SocketAddr, to_send: ToSend) -> Result<(), SendError> {
+        self.send_queue.blocking_send(addr, to_send)
     }
 }

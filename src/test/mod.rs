@@ -41,7 +41,7 @@ mod tests {
             .unwrap();
         let client_address;
         loop {
-            let Ok(Some(msg)) = server.try_recv() else {
+            let Ok(Some(msg)) = server.recv() else {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 continue;
             };
@@ -72,7 +72,7 @@ mod tests {
                 )
                 .unwrap();
             if rng.gen_bool(0.3) {
-                while let Ok(Some(msg)) = client.try_recv() {
+                while let Ok(Some(msg)) = client.recv() {
                     match msg {
                         crate::client::Received::Message { data } => {
                             received.push(data);
@@ -87,7 +87,7 @@ mod tests {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
-            while let Ok(Some(msg)) = client.try_recv() {
+            while let Ok(Some(msg)) = client.recv() {
                 match msg {
                     crate::client::Received::Message { data } => {
                         received.push(data);
@@ -119,7 +119,7 @@ mod tests {
             .unwrap();
         let client_address;
         loop {
-            let Ok(Some(msg)) = server.try_recv() else {
+            let Ok(Some(msg)) = server.recv() else {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 continue;
             };
@@ -147,7 +147,7 @@ mod tests {
                 })
                 .unwrap();
             if rng.gen_bool(0.3) {
-                while let Ok(Some(msg)) = client.try_recv() {
+                while let Ok(Some(msg)) = client.recv() {
                     match msg {
                         crate::client::Received::Message { data } => {
                             received.push(data);
@@ -162,7 +162,7 @@ mod tests {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(500));
-            while let Ok(Some(msg)) = server.try_recv() {
+            while let Ok(Some(msg)) = server.recv() {
                 match msg {
                     (_, crate::server::builder::Received::Message { data }) => {
                         received.push(data);

@@ -41,7 +41,7 @@ impl Connection {
             reliable: ReliableChannels::new(encryption),
             ack_manager: AckManager::new(),
             has_ack_event_queued: false,
-            ack_only_delay: Duration::from_millis(1),
+            ack_only_delay: Duration::from_millis(100),
             is_currently_sending: false,
             send_cool_down: Duration::from_micros(50),
         }
