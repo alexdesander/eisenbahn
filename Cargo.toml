@@ -1,0 +1,33 @@
+[package]
+name = "eisenbahn"
+authors = ["alexdesander"]
+version = "0.1.0"
+edition = "2021"
+description = "A fully udp-based client-server game networking system."
+documentation = "https://docs.rs/eisenbahn"
+readme = "README.md"
+repository = "https://github.com/alexdesander/eisenbahn"
+license = "BSD-3-Clause"
+keywords = ["gamedev", "networking", "udp", "client-server", "multiplayer"]
+categories = ["network-programming", "game-development", "game-engines"]
+
+[dependencies]
+structstruck = "0.4.1"
+ahash = "0.8.11"
+bitvec = "1.0.1"
+crossbeam-channel = "0.5.13"
+integer-encoding = "4.0.0"
+mio = { version = "0.8.11", features = ["net", "os-poll"] }
+rand = { version = "0.8.5", features = ["small_rng"] }
+thiserror = "1.0.61"
+byteorder = "1.5.0"
+aes-gcm = "0.10.3"
+argon2-kdf = "1.5.2"
+chacha20poly1305 = { version = "0.10.1", features = ["reduced-round"] }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+hkdf = "0.12.4"
+sha2 = "0.10.8"
+siphasher = "1.0.1"
+x25519-dalek = "2.0.1"
+strum = { version = "0.26.2", features = ["derive"] }
+strum_macros = "0.26.3"
