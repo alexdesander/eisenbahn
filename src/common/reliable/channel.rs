@@ -238,7 +238,7 @@ impl ReliableChannel {
     /// Handles an incoming packet.
     /// The buf must contain the entire packet (from packet type id to end of packet).
     /// Returns assembled messages in order.
-    pub fn handle(&mut self, buf: &mut [u8]) -> Vec<Vec<u8>> {
+    pub fn handle(&mut self, buf: &mut [u8]) -> Result<Vec<Vec<u8>>, ()> {
         debug_assert!(buf[0] & 0b1111_0000 == self.id.to_u8() << 4);
         let mut id_bytes = [0u8; 8];
         id_bytes[..5].copy_from_slice(&buf[1..6]);
@@ -257,7 +257,7 @@ impl ReliableChannel {
             {
                 // In release mode, we just ignore the ack.
                 debug_assert!(false, "Invalid siphash");
-                return Vec::new();
+                return Err(());
             }
 
             let mut oldest_unacked_bytes = [0u8; 8];
@@ -279,13 +279,13 @@ impl ReliableChannel {
             if !self.encryption.decrypt(&nonce, &[], &mut data, &tag) {
                 // In release mode, we just ignore the packet.
                 debug_assert!(false, "Failed to decrypt packet");
-                return Vec::new();
+                return Err(());
             }
             if self.assembler.needs_fragment(id) {
                 self.assembler.add_fragment(id, data);
             }
         }
 
-        self.assembler.assemble()
+        Ok(self.assembler.assemble())
     }
 }

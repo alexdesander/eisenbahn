@@ -21,25 +21,26 @@ pub fn main() {
         .unwrap();
 
     let _client = client.clone();
-    std::thread::spawn(move || {
-        loop {
-            match _client.blocking_recv().unwrap() {
-                Received::Message { data } => {
-                    let message = String::from_utf8(data).unwrap();
-                    println!("{}", message);
-                }
-                Received::Disconnect { data } => {
-                    let message = String::from_utf8(data).unwrap();
-                    println!("Disconnected: {}", message);
-                    break;
-                }
+    std::thread::spawn(move || loop {
+        match _client.blocking_recv().unwrap() {
+            Received::Message { data } => {
+                let message = String::from_utf8(data).unwrap();
+                println!("{}", message);
+            }
+            Received::Disconnect { reason, data } => {
+                let message = String::from_utf8(data).unwrap();
+                println!("Disconnected: {}, reason: {:?}", message, reason);
+                break;
             }
         }
     });
-    
+
     loop {
         let line: String = read!("{}\n");
-        match client.blocking_send(ToSend::Message { channel: Channel::Reliable0, data: line.as_bytes().to_vec() }) {
+        match client.blocking_send(ToSend::Message {
+            channel: Channel::Reliable0,
+            data: line.as_bytes().to_vec(),
+        }) {
             Ok(_) => {}
             Err(_) => {
                 println!("Failed to send message");

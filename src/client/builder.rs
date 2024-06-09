@@ -535,7 +535,7 @@ impl EisenbahnClient {
         });
 
         Self {
-            network_thread:Arc::new(Mutex::new( Some(network_thread))),
+            network_thread: Arc::new(Mutex::new(Some(network_thread))),
             client_cmds: client_cmds_tx,
             waker,
             to_send_tx,

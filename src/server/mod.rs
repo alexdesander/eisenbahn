@@ -12,10 +12,10 @@ use auth::AuthCmd;
 use builder::{CipherPolicy, Received, ToSend};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use con::Connection;
-use crossbeam_channel::{TryRecvError, TrySendError};
+use crossbeam_channel::{TryRecvError};
 use ed25519_dalek::{ed25519::signature::SignerMut, SigningKey, VerifyingKey};
 use mio::{net::UdpSocket, Events, Interest, Poll, Token, Waker};
-use rand::{thread_rng, Rng};
+use rand::{rngs::SmallRng, thread_rng, Rng, SeedableRng};
 use send_queue::SendQueue;
 use siphasher::sip::SipHasher;
 use x25519_dalek::{EphemeralSecret, PublicKey};
@@ -28,7 +28,7 @@ pub mod builder;
 mod con;
 pub mod send_queue;
 
-pub enum ServerCmd {
+pub(crate) enum ServerCmd {
     SendConnectionResponse {
         addr: SocketAddr,
         cipher: SymCipherAlgorithm,
@@ -76,9 +76,11 @@ pub(crate) enum Event {
     RemoveExpectedPasswordRequest(SocketAddr, u32),
     SendAckOnly(SocketAddr),
     Send(SocketAddr),
+    CheckForTimeout,
+    Disconnect(SocketAddr, DisconnectReason, Vec<u8>),
 }
 
-pub enum SendConnectionResponseType {
+pub(crate) enum SendConnectionResponseType {
     Success {
         payload: Vec<u8>,
         player_name: String,
@@ -92,9 +94,10 @@ pub enum SendConnectionResponseType {
 const RECV_TOKEN: Token = Token(0);
 const WAKE_TOKEN: Token = Token(1);
 
-pub struct State {
+pub(crate) struct State {
     poll: Poll,
     waker: Arc<Waker>,
+    rng: SmallRng,
 
     cmds: crossbeam_channel::Receiver<ServerCmd>,
     auth_cmds: crossbeam_channel::Sender<AuthCmd>,
@@ -118,10 +121,13 @@ pub struct State {
     send_queue: SendQueue,
     to_send_staging_buffer: Vec<(SocketAddr, ToSend)>,
     recv_queue_tx: crossbeam_channel::Sender<(SocketAddr, Received)>,
+
+    timeout_duration: Duration,
+    is_checking_for_timeouts: bool,
 }
 
 impl State {
-    pub fn new(
+    pub(crate) fn new(
         poll: Poll,
         waker: Arc<Waker>,
         cmds: crossbeam_channel::Receiver<ServerCmd>,
@@ -141,6 +147,7 @@ impl State {
         State {
             poll,
             waker,
+            rng: SmallRng::from_entropy(),
             cmds,
             auth_cmds,
             preferred_ciphers,
@@ -162,6 +169,9 @@ impl State {
             send_queue,
             to_send_staging_buffer: Vec::new(),
             recv_queue_tx,
+
+            timeout_duration: Duration::from_secs(12),
+            is_checking_for_timeouts: false,
         }
     }
 
@@ -210,10 +220,8 @@ impl State {
                 PACKET_ID_CONNECTION_REQUEST => self.handle_connection_request(size, addr),
                 PACKET_ID_PASSWORD_REQUEST => self.handle_password_request(size, addr),
                 PACKET_ID_ACK_ONLY => self.handle_ack_only(size, addr),
-                7..=10 => {
-                    self.handle_payload(size, addr);
-                    false
-                }
+                PACKET_ID_DISCONNECT => self.handle_disconnect(size, addr),
+                7..=10 => self.handle_payload(size, addr),
                 _ => continue,
             } {
                 return Ok(true);
@@ -290,7 +298,32 @@ impl State {
                         con.start_sending(&mut self.events);
                     }
                 }
-                ToSend::Disconnect { data } => todo!(),
+                ToSend::Disconnect { data } => {
+                    let size = con.build_disconnect(
+                        &mut self.buf[0..1200],
+                        DisconnectReason::UserInitiated,
+                        &data,
+                    );
+                    for _ in 0..2 {
+                        if self.socket.send_to(&self.buf[0..size], addr).is_err() {
+                            return true;
+                        }
+                    }
+                    self.connections.remove(&addr);
+                    if self
+                        .recv_queue_tx
+                        .send((
+                            addr,
+                            Received::Disconnected {
+                                reason: DisconnectReason::UserInitiated,
+                                data,
+                            },
+                        ))
+                        .is_err()
+                    {
+                        return true;
+                    }
+                }
             }
         }
         false
@@ -337,6 +370,64 @@ impl State {
                         }
                     }
                 }
+                Event::CheckForTimeout => {
+                    let now = Instant::now();
+                    let mut timeouts = 0;
+                    for (addr, con) in &mut self.connections {
+                        if now.duration_since(con.last_received()) > self.timeout_duration {
+                            self.events.push(TimedEvent {
+                                deadline: now
+                                    + con.send_cool_down()
+                                    + Duration::from_millis(self.rng.gen_range(0..150)),
+                                event: Event::Disconnect(
+                                    *addr,
+                                    DisconnectReason::TimeOut,
+                                    Vec::new(),
+                                ),
+                            });
+                            timeouts += 1;
+                        }
+                    }
+                    if timeouts == self.connections.len() {
+                        self.is_checking_for_timeouts = false;
+                    } else {
+                        self.is_checking_for_timeouts = true;
+                        self.events.push(TimedEvent {
+                            deadline: now
+                                + self.timeout_duration
+                                + Duration::from_millis(self.rng.gen_range(0..150)),
+                            event: Event::CheckForTimeout,
+                        });
+                    }
+                }
+                Event::Disconnect(addr, reason, data) => {
+                    let Some(mut con) = self.connections.remove(&addr) else {
+                        continue;
+                    };
+                    if reason == DisconnectReason::TimeOut {
+                        if self
+                            .recv_queue_tx
+                            .send((addr, Received::Disconnected { reason, data }))
+                            .is_err()
+                        {
+                            return Ok(true);
+                        }
+                        continue;
+                    }
+                    let size = con.build_disconnect(&mut self.buf[..1200], reason, &data);
+                    for _ in 0..2 {
+                        if self.socket.send_to(&self.buf[..size], addr).is_err() {
+                            return Ok(true);
+                        }
+                    }
+                    if self
+                        .recv_queue_tx
+                        .send((addr, Received::Disconnected { reason, data }))
+                        .is_err()
+                    {
+                        return Ok(true);
+                    }
+                }
             }
         }
         Ok(false)
@@ -347,14 +438,13 @@ impl State {
             debug_assert!(false, "Connection not found");
             return false;
         };
-        for message in con.handle_packet(&mut self.buf[..size], &mut self.events) {
+        for message in con.handle_payload_packet(&mut self.buf[..size], &mut self.events) {
             match self
                 .recv_queue_tx
-                .try_send((addr, Received::Message { data: message }))
+                .send((addr, Received::Message { data: message }))
             {
                 Ok(_) => continue,
-                Err(TrySendError::Disconnected(_)) => return true,
-                _ => break,
+                Err(_) => return true,
             }
         }
         false
@@ -366,6 +456,24 @@ impl State {
             return false;
         };
         con.handle_ack_only(&mut self.buf[..size]);
+        false
+    }
+
+    fn handle_disconnect(&mut self, size: usize, addr: SocketAddr) -> bool {
+        let Some(con) = self.connections.get_mut(&addr) else {
+            debug_assert!(false, "Connection not found");
+            return false;
+        };
+        if let Some((reason, data)) = con.handle_disconnect(&mut self.buf[..size]) {
+            match self
+                .recv_queue_tx
+                .send((addr, Received::Disconnected { reason, data }))
+            {
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+            self.connections.remove(&addr);
+        }
         false
     }
 
@@ -719,6 +827,13 @@ impl State {
                     addr,
                     Connection::new(addr, player_name.clone(), Rc::new(encryption)),
                 );
+                if !self.is_checking_for_timeouts {
+                    self.is_checking_for_timeouts = true;
+                    self.events.push(TimedEvent {
+                        deadline: Instant::now() + self.timeout_duration,
+                        event: Event::CheckForTimeout,
+                    });
+                }
                 if self
                     .recv_queue_tx
                     .send((addr, Received::Connected { player_name }))
@@ -794,6 +909,13 @@ impl State {
                 addr,
                 Connection::new(addr, player_name.clone(), Rc::new(encryption)),
             );
+            if !self.is_checking_for_timeouts {
+                self.is_checking_for_timeouts = true;
+                self.events.push(TimedEvent {
+                    deadline: Instant::now() + self.timeout_duration,
+                    event: Event::CheckForTimeout,
+                });
+            }
             if self
                 .recv_queue_tx
                 .send((addr, Received::Connected { player_name }))

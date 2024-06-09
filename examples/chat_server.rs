@@ -47,7 +47,9 @@ fn main() {
                         *_addr,
                         ToSend::Message {
                             channel: Channel::Reliable0,
-                            data: format!("{} has joined the chat", player_name).as_bytes().to_vec(),
+                            data: format!("{} has joined the chat", player_name)
+                                .as_bytes()
+                                .to_vec(),
                         },
                     ) {
                         Ok(_) => {}
@@ -77,7 +79,13 @@ fn main() {
                 }
                 println!("{}: {}", chatters.get(&addr).unwrap(), message);
             }
-            (addr, Received::Disconnect { data }) => {
+            (addr, Received::Disconnected { reason, data }) => {
+                println!(
+                    "{} has disconnected, because: {:?}: {}",
+                    chatters.get(&addr).unwrap(),
+                    reason,
+                    String::from_utf8(data).unwrap()
+                );
                 chatters.remove(&addr);
             }
         }

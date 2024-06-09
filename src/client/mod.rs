@@ -9,10 +9,11 @@ use std::{
 use byteorder::WriteBytesExt;
 use crossbeam_channel::{TryRecvError, TrySendError};
 use mio::{net::UdpSocket, Events, Interest, Poll, Token, Waker};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 use crate::common::{
     ack_manager::AckManager,
-    constants::{Channel, PACKET_ID_ACK_ONLY},
+    constants::{Channel, DisconnectReason, PACKET_ID_ACK_ONLY},
     encryption::Encryption,
     reliable::{channel::ReliableChannelId, ReliableChannels},
 };
@@ -31,8 +32,13 @@ pub enum ToSend {
 
 #[derive(Debug)]
 pub enum Received {
-    Message { data: Vec<u8> },
-    Disconnect { data: Vec<u8> },
+    Message {
+        data: Vec<u8>,
+    },
+    Disconnect {
+        reason: DisconnectReason,
+        data: Vec<u8>,
+    },
 }
 
 pub(crate) struct TimedEvent {
@@ -63,12 +69,14 @@ impl Ord for TimedEvent {
 pub(crate) enum Event {
     SendNext,
     SendAckOnly,
+    CheckForTimeout,
 }
 
 const RECV_TOKEN: Token = Token(0);
 pub(crate) const WAKE_TOKEN: Token = Token(1);
 
 pub struct ClientState {
+    rng: SmallRng,
     cmds: crossbeam_channel::Receiver<ClientCmd>,
     socket: UdpSocket,
     poll: Poll,
@@ -87,7 +95,9 @@ pub struct ClientState {
 
     is_sending: bool,
     last_sent: Instant,
+    last_received: Instant,
     send_cooldown: Duration,
+    timeout_duration: Duration,
 }
 
 impl ClientState {
@@ -101,6 +111,7 @@ impl ClientState {
         received_tx: crossbeam_channel::Sender<Received>,
     ) -> Self {
         Self {
+            rng: SmallRng::from_entropy(),
             cmds,
             socket,
             poll,
@@ -116,7 +127,9 @@ impl ClientState {
             received_tx,
             is_sending: false,
             last_sent: Instant::now(),
+            last_received: Instant::now(),
             send_cooldown: Duration::from_micros(50),
+            timeout_duration: Duration::from_secs(10),
         }
     }
 
@@ -125,6 +138,12 @@ impl ClientState {
         self.poll
             .registry()
             .register(&mut self.socket, RECV_TOKEN, Interest::READABLE)?;
+        self.events.push(TimedEvent {
+            deadline: Instant::now()
+                + self.timeout_duration
+                + Duration::from_millis(self.rng.gen_range(0..150)),
+            event: Event::CheckForTimeout,
+        });
 
         loop {
             //TODO: Better timeout handling and waking
@@ -209,6 +228,21 @@ impl ClientState {
                     if self.socket.send(&self.buf[..size]).is_err() {
                         return Ok(true);
                     }
+                }
+                Event::CheckForTimeout => {
+                    if self.last_received.elapsed() > self.timeout_duration {
+                        let _ = self.received_tx.send(Received::Disconnect {
+                            reason: DisconnectReason::TimeOut,
+                            data: Vec::new(),
+                        });
+                        return Ok(true);
+                    }
+                    self.events.push(TimedEvent {
+                        deadline: Instant::now()
+                            + self.timeout_duration
+                            + Duration::from_millis(self.rng.gen_range(0..150)),
+                        event: Event::CheckForTimeout,
+                    });
                 }
             }
         }
@@ -384,6 +418,7 @@ impl ClientState {
                 .handle_ack(ReliableChannelId::Reliable3, oldest, field);
             offset += 6 + size as usize;
         }
+        self.last_received = Instant::now();
     }
 
     fn handle_payload(&mut self, size: usize) -> Vec<Vec<u8>> {
@@ -397,8 +432,19 @@ impl ClientState {
                         event: Event::SendAckOnly,
                     });
                 }
-                self.reliable
+                match self
+                    .reliable
                     .handle(ReliableChannelId::Reliable0, &mut self.buf[..size])
+                {
+                    Ok(x) => {
+                        self.last_received = Instant::now();
+                        x
+                    }
+                    Err(_) => {
+                        debug_assert!(false, "Reliable0 handle failed");
+                        Vec::new()
+                    }
+                }
             }
             x if x == ReliableChannelId::Reliable1.to_u8() => {
                 self.ack_manager.handle_received(Channel::Reliable1);
@@ -409,8 +455,19 @@ impl ClientState {
                         event: Event::SendAckOnly,
                     });
                 }
-                self.reliable
+                match self
+                    .reliable
                     .handle(ReliableChannelId::Reliable1, &mut self.buf[..size])
+                {
+                    Ok(x) => {
+                        self.last_received = Instant::now();
+                        x
+                    }
+                    Err(_) => {
+                        debug_assert!(false, "Reliable1 handle failed");
+                        Vec::new()
+                    }
+                }
             }
             x if x == ReliableChannelId::Reliable2.to_u8() => {
                 self.ack_manager.handle_received(Channel::Reliable2);
@@ -421,8 +478,19 @@ impl ClientState {
                         event: Event::SendAckOnly,
                     });
                 }
-                self.reliable
+                match self
+                    .reliable
                     .handle(ReliableChannelId::Reliable2, &mut self.buf[..size])
+                {
+                    Ok(x) => {
+                        self.last_received = Instant::now();
+                        x
+                    }
+                    Err(_) => {
+                        debug_assert!(false, "Reliable2 handle failed");
+                        Vec::new()
+                    }
+                }
             }
             x if x == ReliableChannelId::Reliable3.to_u8() => {
                 self.ack_manager.handle_received(Channel::Reliable3);
@@ -433,8 +501,19 @@ impl ClientState {
                         event: Event::SendAckOnly,
                     });
                 }
-                self.reliable
+                match self
+                    .reliable
                     .handle(ReliableChannelId::Reliable3, &mut self.buf[..size])
+                {
+                    Ok(x) => {
+                        self.last_received = Instant::now();
+                        x
+                    }
+                    Err(_) => {
+                        debug_assert!(false, "Reliable3 handle failed");
+                        Vec::new()
+                    }
+                }
             }
             _ => unreachable!(),
         }

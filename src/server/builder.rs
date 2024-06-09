@@ -11,7 +11,7 @@ use crate::common::encryption::{auth::AuthenticationKind, sym::SymCipherAlgorith
 use super::{
     auth::{self, AuthState, Authenticator},
     send_queue::{SendError, SendQueue},
-    Channel, ServerCmd, State, WAKE_TOKEN,
+    Channel, DisconnectReason, ServerCmd, State, WAKE_TOKEN,
 };
 
 #[derive(Debug, Error)]
@@ -204,9 +204,16 @@ pub enum ReceiveError {
 
 #[derive(Debug)]
 pub enum Received {
-    Connected { player_name: String },
-    Message { data: Vec<u8> },
-    Disconnect { data: Vec<u8> },
+    Connected {
+        player_name: String,
+    },
+    Message {
+        data: Vec<u8>,
+    },
+    Disconnected {
+        reason: DisconnectReason,
+        data: Vec<u8>,
+    },
 }
 
 pub enum ToSend {
@@ -225,7 +232,7 @@ pub struct EisenbahnServer {
 }
 
 impl EisenbahnServer {
-    pub fn new(
+    pub(crate) fn new(
         auth_thread: Option<JoinHandle<()>>,
         network_thread: Option<JoinHandle<Result<(), std::io::Error>>>,
         auth_cmds_tx: crossbeam_channel::Sender<auth::AuthCmd>,

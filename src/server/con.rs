@@ -17,7 +17,7 @@ use crate::{
     server::PACKET_ID_ACK_ONLY,
 };
 
-use super::{Channel, Event, TimedEvent};
+use super::{Channel, DisconnectReason, Event, TimedEvent, NONCE_DISCONNECT, PACKET_ID_DISCONNECT};
 
 pub struct Connection {
     addr: SocketAddr,
@@ -30,6 +30,7 @@ pub struct Connection {
     ack_only_delay: Duration,
     is_currently_sending: bool,
     send_cool_down: Duration,
+    last_received: Instant,
 }
 
 impl Connection {
@@ -44,6 +45,7 @@ impl Connection {
             ack_only_delay: Duration::from_millis(100),
             is_currently_sending: false,
             send_cool_down: Duration::from_micros(50),
+            last_received: Instant::now(),
         }
     }
 
@@ -53,6 +55,10 @@ impl Connection {
 
     pub fn send_cool_down(&self) -> Duration {
         self.send_cool_down
+    }
+
+    pub fn last_received(&self) -> Instant {
+        self.last_received
     }
 
     pub fn push(&mut self, channel: Channel, message: Vec<u8>) {
@@ -77,7 +83,7 @@ impl Connection {
         self.is_currently_sending = false;
     }
 
-    pub fn handle_packet(
+    pub fn handle_payload_packet(
         &mut self,
         buf: &mut [u8],
         events: &mut BinaryHeap<TimedEvent>,
@@ -92,7 +98,16 @@ impl Connection {
                         event: Event::SendAckOnly(self.addr),
                     });
                 }
-                self.reliable.handle(ReliableChannelId::Reliable0, buf)
+                match self.reliable.handle(ReliableChannelId::Reliable0, buf) {
+                    Ok(x) => {
+                        self.last_received = Instant::now();
+                        x
+                    }
+                    Err(_) => {
+                        debug_assert!(false, "Reliable0 handle failed");
+                        Vec::new()
+                    }
+                }
             }
             x if x == ReliableChannelId::Reliable1.to_u8() => {
                 self.ack_manager.handle_received(Channel::Reliable1);
@@ -103,7 +118,16 @@ impl Connection {
                         event: Event::SendAckOnly(self.addr),
                     });
                 }
-                self.reliable.handle(ReliableChannelId::Reliable1, buf)
+                match self.reliable.handle(ReliableChannelId::Reliable1, buf) {
+                    Ok(x) => {
+                        self.last_received = Instant::now();
+                        x
+                    }
+                    Err(_) => {
+                        debug_assert!(false, "Reliable1 handle failed");
+                        Vec::new()
+                    }
+                }
             }
             x if x == ReliableChannelId::Reliable2.to_u8() => {
                 self.ack_manager.handle_received(Channel::Reliable2);
@@ -114,7 +138,16 @@ impl Connection {
                         event: Event::SendAckOnly(self.addr),
                     });
                 }
-                self.reliable.handle(ReliableChannelId::Reliable2, buf)
+                match self.reliable.handle(ReliableChannelId::Reliable2, buf) {
+                    Ok(x) => {
+                        self.last_received = Instant::now();
+                        x
+                    }
+                    Err(_) => {
+                        debug_assert!(false, "Reliable2 handle failed");
+                        Vec::new()
+                    }
+                }
             }
             x if x == ReliableChannelId::Reliable3.to_u8() => {
                 self.ack_manager.handle_received(Channel::Reliable3);
@@ -125,7 +158,16 @@ impl Connection {
                         event: Event::SendAckOnly(self.addr),
                     });
                 }
-                self.reliable.handle(ReliableChannelId::Reliable3, buf)
+                match self.reliable.handle(ReliableChannelId::Reliable3, buf) {
+                    Ok(x) => {
+                        self.last_received = Instant::now();
+                        x
+                    }
+                    Err(_) => {
+                        debug_assert!(false, "Reliable3 handle failed");
+                        Vec::new()
+                    }
+                }
             }
             _ => unreachable!(),
         }
@@ -182,10 +224,38 @@ impl Connection {
                 .handle_ack(ReliableChannelId::Reliable3, oldest, field);
             offset += 6 + size as usize;
         }
+        self.last_received = Instant::now();
+    }
+
+    /// Returns the reason and payload if the disconnect packet is valid.
+    pub fn handle_disconnect(&mut self, buf: &mut [u8]) -> Option<(DisconnectReason, Vec<u8>)> {
+        let len = buf.len();
+        if len < 17 {
+            debug_assert!(false, "Disconnect packet too short");
+            return None;
+        }
+        let tag: [u8; 16] = buf[len - 16..len].try_into().unwrap();
+        if !self
+            .encryption
+            .decrypt(&NONCE_DISCONNECT, &[], &mut buf[1..len - 16], &tag)
+        {
+            debug_assert!(false, "Failed to decrypt disconnect packet");
+            return None;
+        }
+        let Some(reason) = DisconnectReason::from_u8(buf[1]) else {
+            debug_assert!(false, "Invalid disconnect reason");
+            return None;
+        };
+        let payload;
+        if len > 17 {
+            payload = buf[2..len - 16].to_vec();
+        } else {
+            payload = Vec::new();
+        }
+        Some((reason, payload))
     }
 
     pub fn build_ack_only(&mut self, buf: &mut [u8], events: &mut BinaryHeap<TimedEvent>) -> usize {
-        assert!(self.has_ack_event_queued);
         self.has_ack_event_queued = false;
         buf[0] = PACKET_ID_ACK_ONLY << 4;
         let reliable0_needs_ack = self.ack_manager.needs_ack(Channel::Reliable0);
@@ -242,5 +312,22 @@ impl Connection {
 
     pub fn build_next_payload(&mut self, buf: &mut [u8]) -> Result<usize, Option<Duration>> {
         self.reliable.next(buf)
+    }
+
+    pub fn build_disconnect(
+        &mut self,
+        buf: &mut [u8],
+        reason: DisconnectReason,
+        data: &[u8],
+    ) -> usize {
+        assert!(data.len() <= 1182);
+        buf[0] = PACKET_ID_DISCONNECT << 4;
+        buf[1] = reason.as_u8();
+        buf[2..2 + data.len()].copy_from_slice(data);
+        let tag = self
+            .encryption
+            .encrypt(&NONCE_DISCONNECT, &[], &mut buf[1..2 + data.len()]);
+        buf[2 + data.len()..2 + data.len() + 16].copy_from_slice(&tag);
+        2 + data.len() + 16
     }
 }

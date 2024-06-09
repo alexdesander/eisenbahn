@@ -30,7 +30,11 @@ impl ReliableChannels {
         self.channels[channel.to_index()].push(message);
     }
 
-    pub fn handle(&mut self, channel: ReliableChannelId, buf: &mut [u8]) -> Vec<Vec<u8>> {
+    pub fn handle(
+        &mut self,
+        channel: ReliableChannelId,
+        buf: &mut [u8],
+    ) -> Result<Vec<Vec<u8>>, ()> {
         self.channels[channel.to_index()].handle(buf)
     }
 
