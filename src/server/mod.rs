@@ -12,7 +12,7 @@ use auth::AuthCmd;
 use builder::{CipherPolicy, Received, ToSend};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use con::Connection;
-use crossbeam_channel::{TryRecvError};
+use crossbeam_channel::TryRecvError;
 use ed25519_dalek::{ed25519::signature::SignerMut, SigningKey, VerifyingKey};
 use mio::{net::UdpSocket, Events, Interest, Poll, Token, Waker};
 use rand::{rngs::SmallRng, thread_rng, Rng, SeedableRng};

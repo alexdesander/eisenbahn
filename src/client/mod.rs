@@ -13,7 +13,9 @@ use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 use crate::common::{
     ack_manager::AckManager,
-    constants::{Channel, DisconnectReason, PACKET_ID_ACK_ONLY},
+    constants::{
+        Channel, DisconnectReason, NONCE_DISCONNECT, PACKET_ID_ACK_ONLY, PACKET_ID_DISCONNECT,
+    },
     encryption::Encryption,
     reliable::{channel::ReliableChannelId, ReliableChannels},
 };
@@ -156,7 +158,9 @@ impl ClientState {
                         self.recv_all()?;
                     }
                     WAKE_TOKEN => {
-                        self.handle_to_send_rx();
+                        if self.handle_to_send_rx() {
+                            return Ok(());
+                        }
                     }
                     _ => unreachable!(),
                 }
@@ -179,9 +183,10 @@ impl ClientState {
                 }
                 Err(e) => return Err(e),
             };
-            match (self.buf[0] & 0b1111_0000) >> 4 {
+            let should_shutdown = match (self.buf[0] & 0b1111_0000) >> 4 {
                 PACKET_ID_ACK_ONLY => {
                     self.handle_ack_only(size);
+                    false
                 }
                 7..=10 => {
                     for message in self.handle_payload(size) {
@@ -194,8 +199,13 @@ impl ClientState {
                             _ => break,
                         }
                     }
+                    false
                 }
-                _ => {}
+                PACKET_ID_DISCONNECT => self.handle_disconnect(size),
+                _ => false,
+            };
+            if should_shutdown {
+                return Ok(true);
             }
         }
     }
@@ -249,7 +259,7 @@ impl ClientState {
         Ok(false)
     }
 
-    fn handle_to_send_rx(&mut self) {
+    fn handle_to_send_rx(&mut self) -> bool {
         while let Ok(to_send) = self.to_send_rx.try_recv() {
             match to_send {
                 ToSend::Message { channel, data } => {
@@ -271,9 +281,19 @@ impl ClientState {
                         self.start_sending();
                     }
                 }
-                ToSend::Disconnect { data } => todo!(),
+                ToSend::Disconnect { data } => {
+                    let size = self.build_disconnect(DisconnectReason::UserInitiated, &data);
+                    for _ in 0..2 {
+                        if self.socket.send(&self.buf[..size]).is_err() {
+                            return true;
+                        }
+                        std::thread::sleep(Duration::from_millis(self.rng.gen_range(4..20)));
+                    }
+                    return true;
+                }
             }
         }
+        false
     }
 
     fn start_sending(&mut self) {
@@ -517,5 +537,48 @@ impl ClientState {
             }
             _ => unreachable!(),
         }
+    }
+
+    fn handle_disconnect(&mut self, size: usize) -> bool {
+        if size < 17 {
+            debug_assert!(false, "Disconnect packet too short");
+            return false;
+        }
+        let tag: [u8; 16] = self.buf[size - 16..size].try_into().unwrap();
+        if !self
+            .encryption
+            .decrypt(&NONCE_DISCONNECT, &[], &mut self.buf[1..size - 16], &tag)
+        {
+            debug_assert!(false, "Failed to decrypt disconnect packet");
+            return false;
+        }
+        let Some(reason) = DisconnectReason::from_u8(self.buf[1]) else {
+            debug_assert!(false, "Invalid disconnect reason");
+            return false;
+        };
+        let payload;
+        if size > 17 {
+            payload = self.buf[2..size - 16].to_vec();
+        } else {
+            payload = Vec::new();
+        }
+        self.received_tx
+            .send(Received::Disconnect {
+                reason,
+                data: payload,
+            })
+            .is_err()
+    }
+
+    fn build_disconnect(&mut self, reason: DisconnectReason, data: &[u8]) -> usize {
+        assert!(data.len() <= 1182);
+        self.buf[0] = PACKET_ID_DISCONNECT << 4;
+        self.buf[1] = reason.as_u8();
+        self.buf[2..2 + data.len()].copy_from_slice(data);
+        let tag = self
+            .encryption
+            .encrypt(&NONCE_DISCONNECT, &[], &mut self.buf[1..2 + data.len()]);
+        self.buf[2 + data.len()..2 + data.len() + 16].copy_from_slice(&tag);
+        2 + data.len() + 16
     }
 }
