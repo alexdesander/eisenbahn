@@ -103,7 +103,6 @@ pub struct ClientState {
     timeout_duration: Duration,
     last_latency_discovery: Option<(Instant, u32)>,
 
-
     latency: Duration,
     packet_resend_cooldown: Duration,
 }
@@ -655,6 +654,7 @@ impl ClientState {
     fn set_latency(&mut self, latency: Duration) {
         self.latency = latency;
         self.packet_resend_cooldown = Duration::from_secs_f32(latency.as_secs_f32() * 1.25);
-        self.reliable.set_packet_resend_cooldown(self.packet_resend_cooldown);
+        self.reliable
+            .set_packet_resend_cooldown(self.packet_resend_cooldown);
     }
 }

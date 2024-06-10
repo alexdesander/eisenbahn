@@ -11,7 +11,7 @@ use ahash::HashMap;
 use auth::AuthCmd;
 use builder::{CipherPolicy, Received, ToSend};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use con::Connection;
+use connection::Connection;
 use crossbeam_channel::TryRecvError;
 use ed25519_dalek::{ed25519::signature::SignerMut, SigningKey, VerifyingKey};
 use mio::{net::UdpSocket, Events, Interest, Poll, Token, Waker};
@@ -25,7 +25,7 @@ use crate::common::{constants::*, encryption::auth::AuthenticationKind};
 
 pub mod auth;
 pub mod builder;
-mod con;
+mod connection;
 pub mod send_queue;
 
 pub(crate) enum ServerCmd {

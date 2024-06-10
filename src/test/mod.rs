@@ -175,5 +175,3 @@ mod tests {
         assert_eq!(msgs, received);
     }
 }
-
-// LEFTOFF: Implement disconnecting
