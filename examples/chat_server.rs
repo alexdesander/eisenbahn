@@ -24,7 +24,7 @@ impl NoneAuthenticator for MockNoneAuthenticator {
 
 fn main() {
     let signing_key = SigningKey::generate(&mut rand::thread_rng());
-    let server_address: SocketAddr = "127.0.0.1:44444".parse().unwrap();
+    let server_address: SocketAddr = "0.0.0.0:44444".parse().unwrap();
     let server = ServerBuilder::new(
         server_address,
         Authenticator::None(Box::new(MockNoneAuthenticator)),

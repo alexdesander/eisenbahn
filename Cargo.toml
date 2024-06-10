@@ -36,3 +36,8 @@ strum_macros = "0.26.3"
 [dev-dependencies]
 clap = { version = "4.5.6", features = ["derive"] }
 text_io = "0.1.12"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

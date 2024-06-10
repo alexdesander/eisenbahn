@@ -200,7 +200,7 @@ impl State {
                     _ => unreachable!(),
                 }
             }
-            if self.handle_all_cmds() || self.handle_all_events()? {
+            if self.handle_all_cmds() || self.handle_all_events()?{
                 return Ok(());
             }
         }
@@ -216,6 +216,7 @@ impl State {
                 {
                     break Ok(false);
                 }
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => continue,
                 Err(e) => return Err(e),
             };
             if match (self.buf[0] & 0b1111_0000) >> 4 {

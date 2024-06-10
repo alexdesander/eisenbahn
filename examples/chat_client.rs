@@ -1,6 +1,8 @@
 // DISCLAIMER: THIS CODE WAS BUILT IN A RUSH TO TEST THE PROTOTYPE
 // THIS DOES NOT REPRESENT THE QUALITY OF MY CODE OR THE EISENBAHN PROJECT
 
+use std::net::SocketAddr;
+
 use clap::Parser;
 use eisenbahn::{
     client::{builder::ClientBuilder, Received, ToSend},
@@ -10,6 +12,7 @@ use text_io::read;
 
 #[derive(Parser)]
 struct Args {
+    ip: SocketAddr,
     username: String,
 }
 
@@ -17,7 +20,7 @@ pub fn main() {
     let args = Args::parse();
     let client = ClientBuilder::new()
         .with_none_authentication(Some(AuthenticationNone::new(args.username)))
-        .connect("127.0.0.1:44444".parse().unwrap(), None)
+        .connect(args.ip, None)
         .unwrap();
 
     // Receive messages in a separate thread, because stdin reading is blocking
