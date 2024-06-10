@@ -1,13 +1,16 @@
 // DISCLAIMER: THIS CODE WAS BUILT IN A RUSH TO TEST THE PROTOTYPE
 // THIS DOES NOT REPRESENT THE QUALITY OF MY CODE OR THE EISENBAHN PROJECT
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use clap::Parser;
 use eisenbahn::{
     client::{builder::ClientBuilder, Received, ToSend},
-    common::{constants::Channel, encryption::auth::AuthenticationNone},
+    common::{
+        constants::Channel, encryption::auth::AuthenticationNone, socket::NetworkCircumstances,
+    },
 };
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 use text_io::read;
 
 #[derive(Parser)]
@@ -16,10 +19,35 @@ struct Args {
     username: String,
 }
 
+struct TerribleNetworkConditions {
+    rng: SmallRng,
+}
+
+impl TerribleNetworkConditions {
+    fn new() -> Self {
+        Self {
+            rng: SmallRng::from_entropy(),
+        }
+    }
+}
+
+impl NetworkCircumstances for TerribleNetworkConditions {
+    fn simulate_packet_loss(&mut self, _packet_size: usize) -> bool {
+        // 60% packet loss
+        self.rng.gen_bool(0.6)
+    }
+
+    fn simulate_packet_latency(&mut self, _packet_size: usize) -> std::time::Duration {
+        // 10-2000ms latency
+        std::time::Duration::from_millis(self.rng.gen_range(10..2000))
+    }
+}
+
 pub fn main() {
     let args = Args::parse();
     let client = ClientBuilder::new()
         .with_none_authentication(Some(AuthenticationNone::new(args.username)))
+        .with_network_circumstances(Box::new(TerribleNetworkConditions::new()))
         .connect(args.ip, None)
         .unwrap();
 

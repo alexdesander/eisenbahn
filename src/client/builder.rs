@@ -25,6 +25,7 @@ use crate::common::{
         sym::SymCipherAlgorithm,
         Encryption,
     },
+    socket::{NetworkCircumstances, Socket},
 };
 
 use super::{ClientCmd, ClientState, Received, ToSend, WAKE_TOKEN};
@@ -70,6 +71,7 @@ pub struct ClientBuilder {
     password_authentication: Option<AuthenticationPassword>,
     ca_authentication: Option<AuthenticationCA>,
     send_queue_max_pending_messages: usize,
+    network_circumstances: Option<Box<dyn NetworkCircumstances>>,
 }
 
 impl ClientBuilder {
@@ -88,6 +90,7 @@ impl ClientBuilder {
             password_authentication: None,
             ca_authentication: None,
             send_queue_max_pending_messages: 1024,
+            network_circumstances: None,
         }
     }
 
@@ -162,8 +165,17 @@ impl ClientBuilder {
         self
     }
 
+    /// Only active with crate feature "network_testing"
+    pub fn with_network_circumstances(
+        mut self,
+        network_circumstances: Box<dyn NetworkCircumstances>,
+    ) -> Self {
+        self.network_circumstances = Some(network_circumstances);
+        self
+    }
+
     pub fn connect(
-        &self,
+        self,
         server_address: SocketAddr,
         trusted_server_key: Option<VerifyingKey>,
     ) -> Result<EisenbahnClient, ConnectError> {
@@ -412,6 +424,8 @@ impl ClientBuilder {
             };
             return Ok(EisenbahnClient::new(
                 socket,
+                server_address,
+                self.network_circumstances,
                 encryption,
                 self.send_queue_max_pending_messages,
             ));
@@ -478,6 +492,8 @@ impl ClientBuilder {
         }
         Ok(EisenbahnClient::new(
             socket,
+            server_address,
+            self.network_circumstances,
             encryption,
             self.send_queue_max_pending_messages,
         ))
@@ -510,10 +526,11 @@ pub struct EisenbahnClient {
 impl EisenbahnClient {
     pub fn new(
         socket: UdpSocket,
+        server_addr: SocketAddr,
+        network_circumstances: Option<Box<dyn NetworkCircumstances>>,
         encryption: Encryption,
         send_queue_max_pending_messages: usize,
     ) -> Self {
-        socket.set_nonblocking(true).unwrap();
         let (client_cmds_tx, client_cmds_rx) = crossbeam_channel::unbounded();
         let (to_send_tx, to_send_rx) = crossbeam_channel::bounded(send_queue_max_pending_messages);
         let (received_tx, received_rx) = crossbeam_channel::unbounded();
@@ -521,10 +538,12 @@ impl EisenbahnClient {
         let poll = Poll::new().unwrap();
         let waker = Arc::new(Waker::new(poll.registry(), WAKE_TOKEN).unwrap());
         let _waker = waker.clone();
-        let network_thread = std::thread::spawn(|| {
+        let network_thread = std::thread::spawn(move || {
+            let mut socket = Socket::new(socket, network_circumstances).unwrap();
+            socket.connect(server_addr).unwrap();
             let mut state = ClientState::new(
                 client_cmds_rx,
-                mio::net::UdpSocket::from_std(socket),
+                socket,
                 poll,
                 _waker,
                 Rc::new(encryption),

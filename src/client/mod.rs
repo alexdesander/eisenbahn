@@ -1,6 +1,7 @@
 use std::{
     collections::BinaryHeap,
     io::{self, Write},
+    ops::DerefMut,
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
@@ -19,6 +20,7 @@ use crate::common::{
     },
     encryption::Encryption,
     reliable::{channel::ReliableChannelId, ReliableChannels},
+    socket::Socket,
 };
 
 pub mod builder;
@@ -81,7 +83,7 @@ pub(crate) const WAKE_TOKEN: Token = Token(1);
 pub struct ClientState {
     rng: SmallRng,
     cmds: crossbeam_channel::Receiver<ClientCmd>,
-    socket: UdpSocket,
+    socket: Socket,
     poll: Poll,
     waker: Arc<Waker>,
     buf: [u8; 1201],
@@ -110,7 +112,7 @@ pub struct ClientState {
 impl ClientState {
     pub fn new(
         cmds: crossbeam_channel::Receiver<ClientCmd>,
-        socket: UdpSocket,
+        socket: Socket,
         poll: Poll,
         waker: Arc<Waker>,
         encryption: Rc<Encryption>,
@@ -146,9 +148,11 @@ impl ClientState {
 
     pub fn run(&mut self) -> io::Result<()> {
         let mut events = Events::with_capacity(16);
-        self.poll
-            .registry()
-            .register(&mut self.socket, RECV_TOKEN, Interest::READABLE)?;
+        self.poll.registry().register(
+            self.socket.inner().deref_mut(),
+            RECV_TOKEN,
+            Interest::READABLE,
+        )?;
         self.events.push(TimedEvent {
             deadline: Instant::now()
                 + self.timeout_duration

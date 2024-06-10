@@ -11,6 +11,9 @@ license = "BSD-3-Clause"
 keywords = ["gamedev", "networking", "udp", "client-server", "multiplayer"]
 categories = ["network-programming", "game-development", "game-engines"]
 
+[features]
+network_testing = []
+
 [dependencies]
 structstruck = "0.4.1"
 ahash = "0.8.11"

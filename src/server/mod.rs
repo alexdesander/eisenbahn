@@ -2,6 +2,7 @@ use std::{
     collections::BinaryHeap,
     io::{self, Read, Write},
     net::SocketAddr,
+    ops::DerefMut,
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -20,8 +21,11 @@ use send_queue::SendQueue;
 use siphasher::sip::SipHasher;
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
-use crate::common::encryption::{sym::SymCipherAlgorithm, Encryption};
 use crate::common::{constants::*, encryption::auth::AuthenticationKind};
+use crate::common::{
+    encryption::{sym::SymCipherAlgorithm, Encryption},
+    socket::Socket,
+};
 
 pub mod auth;
 pub mod builder;
@@ -113,7 +117,7 @@ pub(crate) struct State {
     siphasher: SipHasher,
     password_salt: [u8; 16],
 
-    socket: UdpSocket,
+    socket: Socket,
     buf: [u8; 1201],
     events: BinaryHeap<TimedEvent>,
     expected_password_requests: HashMap<(SocketAddr, u32), Encryption>,
@@ -136,7 +140,7 @@ impl State {
         auth_cmds: crossbeam_channel::Sender<AuthCmd>,
         preferred_ciphers: Vec<SymCipherAlgorithm>,
         cipher_policy: CipherPolicy,
-        socket: UdpSocket,
+        socket: Socket,
         min_client_version: (u32, u32, u32),
         max_client_version: (u32, u32, u32),
         auth_kind: AuthenticationKind,
@@ -180,9 +184,11 @@ impl State {
 
     pub fn run(&mut self) -> io::Result<()> {
         let mut events = Events::with_capacity(16);
-        self.poll
-            .registry()
-            .register(&mut self.socket, RECV_TOKEN, Interest::READABLE)?;
+        self.poll.registry().register(
+            self.socket.inner().deref_mut(),
+            RECV_TOKEN,
+            Interest::READABLE,
+        )?;
 
         loop {
             //TODO: Better timeout handling and waking
@@ -200,7 +206,7 @@ impl State {
                     _ => unreachable!(),
                 }
             }
-            if self.handle_all_cmds() || self.handle_all_events()?{
+            if self.handle_all_cmds() || self.handle_all_events()? {
                 return Ok(());
             }
         }
@@ -310,7 +316,7 @@ impl State {
                         &data,
                     );
                     for _ in 0..2 {
-                        if self.socket.send_to(&self.buf[0..size], addr).is_err() {
+                        if self.socket.send_to(addr, &self.buf[0..size]).is_err() {
                             return true;
                         }
                     }
@@ -348,7 +354,7 @@ impl State {
                 Event::SendAckOnly(addr) => {
                     if let Some(con) = self.connections.get_mut(&addr) {
                         let size = con.build_ack_only(&mut self.buf[..1200], &mut self.events);
-                        if self.socket.send_to(&self.buf[..size], addr).is_err() {
+                        if self.socket.send_to(addr, &self.buf[..size]).is_err() {
                             return Ok(true);
                         }
                     }
@@ -357,7 +363,7 @@ impl State {
                     if let Some(con) = self.connections.get_mut(&addr) {
                         match con.build_next_payload(&mut self.buf) {
                             Ok(size) => {
-                                self.socket.send_to(&self.buf[0..size], addr)?;
+                                self.socket.send_to(addr, &self.buf[0..size])?;
                                 self.events.push(TimedEvent {
                                     deadline: Instant::now() + con.send_cool_down(),
                                     event: Event::Send(addr),
@@ -421,7 +427,7 @@ impl State {
                     }
                     let size = con.build_disconnect(&mut self.buf[..1200], reason, &data);
                     for _ in 0..2 {
-                        if self.socket.send_to(&self.buf[..size], addr).is_err() {
+                        if self.socket.send_to(addr, &self.buf[..size]).is_err() {
                             return Ok(true);
                         }
                     }
@@ -438,7 +444,7 @@ impl State {
                         continue;
                     };
                     let size = con.build_latency_discovery(&mut self.buf[..1200]);
-                    if self.socket.send_to(&self.buf[..size], addr).is_err() {
+                    if self.socket.send_to(addr, &self.buf[..size]).is_err() {
                         return Ok(true);
                     }
                     self.events.push(TimedEvent {
@@ -505,7 +511,7 @@ impl State {
         let Some(size) = con.handle_latency_response(&mut self.buf[..size]) else {
             return false;
         };
-        if self.socket.send_to(&self.buf[..size], addr).is_err() {
+        if self.socket.send_to(addr, &self.buf[..size]).is_err() {
             return true;
         }
         false
@@ -785,7 +791,7 @@ impl State {
                 .unwrap();
             b.write_u32::<LittleEndian>(self.max_client_version.2)
                 .unwrap();
-            self.socket.send_to(&self.buf[..37], addr).unwrap();
+            self.socket.send_to(addr, &self.buf[..37]).unwrap();
             return false;
         }
         let challenge: u32 = thread_rng().gen();
@@ -797,7 +803,7 @@ impl State {
         (&mut self.buf[50..])
             .write_u64::<LittleEndian>(siphash)
             .unwrap();
-        self.socket.send_to(&self.buf[..58], addr).unwrap();
+        self.socket.send_to(addr, &self.buf[..58]).unwrap();
         false
     }
 
@@ -842,7 +848,7 @@ impl State {
                     0 => {
                         let signature = self.signing_key.sign(&self.buf[..53]);
                         self.buf[53..53 + 64].copy_from_slice(&signature.to_bytes());
-                        self.socket.send_to(&self.buf[..53 + 64], addr).unwrap();
+                        self.socket.send_to(addr, &self.buf[..53 + 64]).unwrap();
                     }
                     x => {
                         let tag = encryption.encrypt(&NONCE_CONNECTION_RESPONSE, &[], &mut payload);
@@ -852,7 +858,7 @@ impl State {
                         self.buf[53 + x + 16..53 + x + 16 + 64]
                             .copy_from_slice(&signature.to_bytes());
                         self.socket
-                            .send_to(&self.buf[..53 + x + 16 + 64], addr)
+                            .send_to(addr, &self.buf[..53 + x + 16 + 64])
                             .unwrap();
                     }
                 }
@@ -886,7 +892,7 @@ impl State {
                     0 => {
                         let signature = self.signing_key.sign(&self.buf[..53]);
                         self.buf[53..53 + 64].copy_from_slice(&signature.to_bytes());
-                        self.socket.send_to(&self.buf[..53 + 64], addr).unwrap();
+                        self.socket.send_to(addr, &self.buf[..53 + 64]).unwrap();
                     }
                     x => {
                         let tag = encryption.encrypt(&NONCE_CONNECTION_RESPONSE, &[], &mut payload);
@@ -896,7 +902,7 @@ impl State {
                         self.buf[53 + x + 16..53 + x + 16 + 64]
                             .copy_from_slice(&signature.to_bytes());
                         self.socket
-                            .send_to(&self.buf[..53 + x + 16 + 64], addr)
+                            .send_to(addr, &self.buf[..53 + x + 16 + 64])
                             .unwrap();
                     }
                 }
@@ -915,7 +921,7 @@ impl State {
                     deadline: Instant::now() + std::time::Duration::from_secs(5),
                     event: Event::RemoveExpectedPasswordRequest(addr, salt),
                 });
-                self.socket.send_to(&self.buf[..53 + 64], addr).unwrap();
+                self.socket.send_to(addr, &self.buf[..53 + 64]).unwrap();
             }
         }
 
@@ -967,7 +973,7 @@ impl State {
             }
         }
         self.socket
-            .send_to(&self.buf[..5 + connection_information.len() + 16], addr)
+            .send_to(addr, &self.buf[..5 + connection_information.len() + 16])
             .unwrap();
         false
     }

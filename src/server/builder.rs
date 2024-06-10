@@ -1,12 +1,19 @@
-use std::{net::SocketAddr, sync::Arc, thread::JoinHandle};
+use std::{
+    net::{SocketAddr, UdpSocket},
+    sync::Arc,
+    thread::JoinHandle,
+};
 
 use ed25519_dalek::SigningKey;
-use mio::{net::UdpSocket, Poll, Waker};
+use mio::{Poll, Waker};
 use rand::random;
 use siphasher::sip::SipHasher;
 use thiserror::Error;
 
-use crate::common::encryption::{auth::AuthenticationKind, sym::SymCipherAlgorithm};
+use crate::common::{
+    encryption::{auth::AuthenticationKind, sym::SymCipherAlgorithm},
+    socket::{NetworkCircumstances, Socket},
+};
 
 use super::{
     auth::{self, AuthState, Authenticator},
@@ -45,6 +52,7 @@ pub struct ServerBuilder {
     password_salt: [u8; 16],
     packet_receive_queue_size: usize,
     max_pending_messages_per_connection: usize,
+    network_circumstances: Option<Box<dyn NetworkCircumstances>>,
 }
 
 impl ServerBuilder {
@@ -68,6 +76,7 @@ impl ServerBuilder {
             password_salt,
             packet_receive_queue_size: 4096,
             max_pending_messages_per_connection: 1024,
+            network_circumstances: None,
         }
     }
 
@@ -135,6 +144,15 @@ impl ServerBuilder {
         self
     }
 
+    /// Only active with crate feature "network_testing"
+    pub fn with_network_circumstances(
+        mut self,
+        network_circumstances: Box<dyn NetworkCircumstances>,
+    ) -> Self {
+        self.network_circumstances = Some(network_circumstances);
+        self
+    }
+
     pub fn run(self) -> Result<EisenbahnServer, ServerStartError> {
         let socket = UdpSocket::bind(self.bind_address)?;
         let auth_kind = match &self.authenticator {
@@ -173,7 +191,7 @@ impl ServerBuilder {
                 _auth_cmds_tx,
                 self.preferred_ciphers,
                 self.cipher_policy,
-                socket,
+                Socket::new(socket, self.network_circumstances)?,
                 self.compatible_versions_min,
                 self.compatible_versions_max,
                 auth_kind,
