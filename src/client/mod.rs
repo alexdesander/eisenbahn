@@ -15,6 +15,7 @@ use crate::common::{
     ack_manager::AckManager,
     constants::{
         Channel, DisconnectReason, NONCE_DISCONNECT, PACKET_ID_ACK_ONLY, PACKET_ID_DISCONNECT,
+        PACKET_ID_LATENCY_DISCOVERY, PACKET_ID_LATENCY_RESPONSE, PACKET_ID_LATENCY_RESPONSE_2,
     },
     encryption::Encryption,
     reliable::{channel::ReliableChannelId, ReliableChannels},
@@ -100,6 +101,8 @@ pub struct ClientState {
     last_received: Instant,
     send_cooldown: Duration,
     timeout_duration: Duration,
+    last_latency_discovery: Option<(Instant, u32)>,
+    latency: Duration,
 }
 
 impl ClientState {
@@ -132,6 +135,8 @@ impl ClientState {
             last_received: Instant::now(),
             send_cooldown: Duration::from_micros(50),
             timeout_duration: Duration::from_secs(10),
+            last_latency_discovery: None,
+            latency: Duration::from_millis(100),
         }
     }
 
@@ -201,6 +206,8 @@ impl ClientState {
                     }
                     false
                 }
+                PACKET_ID_LATENCY_DISCOVERY => self.handle_latency_discovery(size),
+                PACKET_ID_LATENCY_RESPONSE_2 => self.handle_latency_response_2(size),
                 PACKET_ID_DISCONNECT => self.handle_disconnect(size),
                 _ => false,
             };
@@ -378,7 +385,7 @@ impl ClientState {
             b.write_all(field).unwrap();
             offset += 6 + field.len();
         }
-        let siphash = self.encryption.siphash(&self.buf[0..offset]);
+        let siphash = self.encryption.siphash_out(&self.buf[0..offset]);
         self.buf[offset..offset + 3].copy_from_slice(&siphash.to_le_bytes()[..3]);
         offset + 3
     }
@@ -387,7 +394,7 @@ impl ClientState {
         if self.buf[size - 3..size]
             != self
                 .encryption
-                .siphash(&self.buf[0..size - 3])
+                .siphash_in(&self.buf[0..size - 3])
                 .to_le_bytes()[..3]
         {
             debug_assert!(false, "Ack Only siphash mismatch");
@@ -580,5 +587,63 @@ impl ClientState {
             .encrypt(&NONCE_DISCONNECT, &[], &mut self.buf[1..2 + data.len()]);
         self.buf[2 + data.len()..2 + data.len() + 16].copy_from_slice(&tag);
         2 + data.len() + 16
+    }
+
+    /// Also sends the latency response packet
+    fn handle_latency_discovery(&mut self, size: usize) -> bool {
+        if size != 9 {
+            debug_assert!(false, "Invalid latency discovery packet size");
+            return false;
+        }
+        let siphash = self.encryption.siphash_in(&self.buf[1..5]);
+        if siphash.to_le_bytes()[..4] != self.buf[5..9] {
+            debug_assert!(false, "Invalid siphash in latency discovery packet");
+            return false;
+        }
+        let salt_bytes: [u8; 4] = self.buf[1..5].try_into().unwrap();
+        let salt = u32::from_le_bytes(salt_bytes);
+
+        // Send latency response
+        self.buf[0] = PACKET_ID_LATENCY_RESPONSE << 4;
+        let siphash = self.encryption.siphash_out(&self.buf[1..9]);
+        self.buf[9..13].copy_from_slice(&siphash.to_le_bytes()[..4]);
+        self.last_latency_discovery = Some((Instant::now(), salt));
+        self.last_received = Instant::now();
+        if self.socket.send(&self.buf[..13]).is_err() {
+            return true;
+        }
+        false
+    }
+
+    fn handle_latency_response_2(&mut self, size: usize) -> bool {
+        let Some((last, salt)) = self.last_latency_discovery else {
+            debug_assert!(
+                false,
+                "Received latency response 2 without sending discovery packet"
+            );
+            return false;
+        };
+        if size != 13 {
+            debug_assert!(false, "Invalid latency response 2 packet size");
+            return false;
+        }
+        let siphash = self.encryption.siphash_in(&self.buf[1..5]);
+        if siphash.to_le_bytes()[..4] != self.buf[5..9] {
+            debug_assert!(false, "Invalid siphash in latency discovery packet 0");
+            return false;
+        }
+        if salt.to_le_bytes() != self.buf[1..5] {
+            debug_assert!(false, "Invalid salt in latency response 2 packet");
+            return false;
+        }
+        let siphash = self.encryption.siphash_in(&self.buf[1..9]);
+        if siphash.to_le_bytes()[..4] != self.buf[9..13] {
+            debug_assert!(false, "Invalid siphash in latency discovery packet 1");
+            return false;
+        }
+        self.last_latency_discovery = None;
+        self.latency = last.elapsed();
+        self.last_received = Instant::now();
+        false
     }
 }

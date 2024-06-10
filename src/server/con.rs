@@ -7,6 +7,7 @@ use std::{
 };
 
 use byteorder::WriteBytesExt;
+use rand::{thread_rng, Rng};
 
 use crate::{
     common::{
@@ -17,7 +18,10 @@ use crate::{
     server::PACKET_ID_ACK_ONLY,
 };
 
-use super::{Channel, DisconnectReason, Event, TimedEvent, NONCE_DISCONNECT, PACKET_ID_DISCONNECT};
+use super::{
+    Channel, DisconnectReason, Event, TimedEvent, NONCE_DISCONNECT, PACKET_ID_DISCONNECT,
+    PACKET_ID_LATENCY_DISCOVERY, PACKET_ID_LATENCY_RESPONSE_2,
+};
 
 pub struct Connection {
     addr: SocketAddr,
@@ -31,6 +35,8 @@ pub struct Connection {
     is_currently_sending: bool,
     send_cool_down: Duration,
     last_received: Instant,
+    last_latency_discovery: Option<(Instant, u32)>,
+    latency: Duration,
 }
 
 impl Connection {
@@ -46,6 +52,9 @@ impl Connection {
             is_currently_sending: false,
             send_cool_down: Duration::from_micros(50),
             last_received: Instant::now(),
+            last_latency_discovery: None,
+            // TODO: Discover latency at the connection building
+            latency: Duration::from_millis(100),
         }
     }
 
@@ -175,7 +184,7 @@ impl Connection {
 
     pub fn handle_ack_only(&mut self, buf: &mut [u8]) {
         let size = buf.len();
-        if buf[size - 3..size] != self.encryption.siphash(&buf[0..size - 3]).to_le_bytes()[..3] {
+        if buf[size - 3..size] != self.encryption.siphash_in(&buf[0..size - 3]).to_le_bytes()[..3] {
             debug_assert!(false, "Ack Only siphash mismatch");
             return;
         }
@@ -305,7 +314,7 @@ impl Connection {
             b.write_all(field).unwrap();
             offset += 6 + field.len();
         }
-        let siphash = self.encryption.siphash(&buf[0..offset]);
+        let siphash = self.encryption.siphash_out(&buf[0..offset]);
         buf[offset..offset + 3].copy_from_slice(&siphash.to_le_bytes()[..3]);
         offset + 3
     }
@@ -329,5 +338,52 @@ impl Connection {
             .encrypt(&NONCE_DISCONNECT, &[], &mut buf[1..2 + data.len()]);
         buf[2 + data.len()..2 + data.len() + 16].copy_from_slice(&tag);
         2 + data.len() + 16
+    }
+
+    pub fn build_latency_discovery(&mut self, buf: &mut [u8]) -> usize {
+        buf[0] = PACKET_ID_LATENCY_DISCOVERY << 4;
+        let salt: u32 = thread_rng().gen();
+        buf[1..5].copy_from_slice(&salt.to_le_bytes());
+        let siphash = self.encryption.siphash_out(&buf[1..5]);
+        buf[5..9].copy_from_slice(&siphash.to_le_bytes()[..4]);
+        self.last_latency_discovery = Some((Instant::now(), salt));
+        9
+    }
+
+    /// Also builds latency response 2
+    pub fn handle_latency_response(&mut self, buf: &mut [u8]) -> Option<usize> {
+        // Calculate latency
+        let len = buf.len();
+        if len != 13 {
+            debug_assert!(false, "Invalid latency response length");
+            return None;
+        }
+        let Some((last, salt)) = self.last_latency_discovery else {
+            debug_assert!(false, "No latency discovery sent before latency response");
+            return None;
+        };
+        if buf[1..5] != salt.to_le_bytes() {
+            debug_assert!(false, "Invalid latency response salt");
+            return None;
+        }
+        let siphash = self.encryption.siphash_out(&buf[1..5]);
+        if siphash.to_le_bytes()[..4] != buf[5..9] {
+            debug_assert!(false, "Invalid latency response siphash 0");
+            return None;
+        }
+        let siphash = self.encryption.siphash_in(&buf[1..9]);
+        if siphash.to_le_bytes()[..4] != buf[9..13] {
+            debug_assert!(false, "Invalid latency response siphash 1");
+            return None;
+        }
+        self.latency = last.elapsed();
+        self.last_received = Instant::now();
+
+        // Build latency response 2
+        buf[0] = PACKET_ID_LATENCY_RESPONSE_2 << 4;
+        let siphash = self.encryption.siphash_out(&buf[1..9]);
+        buf[9..13].copy_from_slice(&siphash.to_le_bytes()[..4]);
+        self.last_latency_discovery = None;
+        Some(13)
     }
 }

@@ -1,16 +1,12 @@
 // DISCLAIMER: THIS CODE WAS BUILT IN A RUSH TO TEST THE PROTOTYPE
 // THIS DOES NOT REPRESENT THE QUALITY OF MY CODE OR THE EISENBAHN PROJECT
 
-
 use clap::Parser;
 use eisenbahn::{
     client::{builder::ClientBuilder, Received, ToSend},
-    common::{
-        constants::{Channel},
-        encryption::auth::AuthenticationNone,
-    },
+    common::{constants::Channel, encryption::auth::AuthenticationNone},
 };
-use text_io::{read};
+use text_io::read;
 
 #[derive(Parser)]
 struct Args {

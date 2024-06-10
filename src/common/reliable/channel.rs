@@ -212,7 +212,7 @@ impl ReliableChannel {
                 buf[6] = ack_size as u8;
                 buf[7..12].copy_from_slice(&oldest_unacked.to_le_bytes()[..5]);
                 buf[12..12 + ack_size].copy_from_slice(&ack_bitfield[..ack_size]);
-                let siphash = self.encryption.siphash(&buf[6..12 + ack_size]);
+                let siphash = self.encryption.siphash_out(&buf[6..12 + ack_size]);
                 buf[12 + ack_size..15 + ack_size].copy_from_slice(&siphash.to_le_bytes()[..3]);
                 let payload_offset = 15 + ack_size;
 
@@ -252,7 +252,7 @@ impl ReliableChannel {
             if ack_siphash
                 != &self
                     .encryption
-                    .siphash(&buf[6..12 + ack_size])
+                    .siphash_in(&buf[6..12 + ack_size])
                     .to_le_bytes()[..3]
             {
                 // In release mode, we just ignore the ack.

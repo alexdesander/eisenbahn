@@ -51,6 +51,9 @@ pub(crate) const PACKET_ID_PASSWORD_REQUEST: u8 = 4;
 pub(crate) const PACKET_ID_PASSWORD_RESPONSE: u8 = 5;
 pub(crate) const PACKET_ID_DISCONNECT: u8 = 6;
 pub(crate) const PACKET_ID_ACK_ONLY: u8 = 11;
+pub(crate) const PACKET_ID_LATENCY_DISCOVERY: u8 = 12;
+pub(crate) const PACKET_ID_LATENCY_RESPONSE: u8 = 13;
+pub(crate) const PACKET_ID_LATENCY_RESPONSE_2: u8 = 14;
 
 pub(crate) const NONCE_CONNECTION_RESPONSE: [u8; 12] = [255; 12];
 pub(crate) const NONCE_PASSWORD_REQUEST: [u8; 12] =

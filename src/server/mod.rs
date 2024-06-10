@@ -78,6 +78,7 @@ pub(crate) enum Event {
     Send(SocketAddr),
     CheckForTimeout,
     Disconnect(SocketAddr, DisconnectReason, Vec<u8>),
+    LatencyDiscovery(SocketAddr),
 }
 
 pub(crate) enum SendConnectionResponseType {
@@ -124,6 +125,7 @@ pub(crate) struct State {
 
     timeout_duration: Duration,
     is_checking_for_timeouts: bool,
+    latency_discovery_cooldown: Duration,
 }
 
 impl State {
@@ -172,6 +174,7 @@ impl State {
 
             timeout_duration: Duration::from_secs(12),
             is_checking_for_timeouts: false,
+            latency_discovery_cooldown: Duration::from_secs(2),
         }
     }
 
@@ -216,12 +219,13 @@ impl State {
                 Err(e) => return Err(e),
             };
             if match (self.buf[0] & 0b1111_0000) >> 4 {
+                7..=10 => self.handle_payload(size, addr),
+                PACKET_ID_LATENCY_RESPONSE => self.handle_latency_response(size, addr),
                 PACKET_ID_CLIENT_HELLO => self.handle_client_hello(size, addr),
                 PACKET_ID_CONNECTION_REQUEST => self.handle_connection_request(size, addr),
                 PACKET_ID_PASSWORD_REQUEST => self.handle_password_request(size, addr),
                 PACKET_ID_ACK_ONLY => self.handle_ack_only(size, addr),
                 PACKET_ID_DISCONNECT => self.handle_disconnect(size, addr),
-                7..=10 => self.handle_payload(size, addr),
                 _ => continue,
             } {
                 return Ok(true);
@@ -428,6 +432,21 @@ impl State {
                         return Ok(true);
                     }
                 }
+                Event::LatencyDiscovery(addr) => {
+                    let Some(con) = self.connections.get_mut(&addr) else {
+                        continue;
+                    };
+                    let size = con.build_latency_discovery(&mut self.buf[..1200]);
+                    if self.socket.send_to(&self.buf[..size], addr).is_err() {
+                        return Ok(true);
+                    }
+                    self.events.push(TimedEvent {
+                        deadline: Instant::now()
+                            + self.latency_discovery_cooldown
+                            + Duration::from_millis(self.rng.gen_range(0..15)),
+                        event: Event::LatencyDiscovery(addr),
+                    });
+                }
             }
         }
         Ok(false)
@@ -473,6 +492,20 @@ impl State {
                 Err(_) => return true,
             }
             self.connections.remove(&addr);
+        }
+        false
+    }
+
+    fn handle_latency_response(&mut self, size: usize, addr: SocketAddr) -> bool {
+        let Some(con) = self.connections.get_mut(&addr) else {
+            debug_assert!(false, "Connection not found");
+            return false;
+        };
+        let Some(size) = con.handle_latency_response(&mut self.buf[..size]) else {
+            return false;
+        };
+        if self.socket.send_to(&self.buf[..size], addr).is_err() {
+            return true;
         }
         false
     }
@@ -834,6 +867,10 @@ impl State {
                         event: Event::CheckForTimeout,
                     });
                 }
+                self.events.push(TimedEvent {
+                    deadline: Instant::now(),
+                    event: Event::LatencyDiscovery(addr),
+                });
                 if self
                     .recv_queue_tx
                     .send((addr, Received::Connected { player_name }))
@@ -916,6 +953,10 @@ impl State {
                     event: Event::CheckForTimeout,
                 });
             }
+            self.events.push(TimedEvent {
+                deadline: Instant::now(),
+                event: Event::LatencyDiscovery(addr),
+            });
             if self
                 .recv_queue_tx
                 .send((addr, Received::Connected { player_name }))
