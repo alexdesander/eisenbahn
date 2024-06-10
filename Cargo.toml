@@ -22,7 +22,7 @@ rand = { version = "0.8.5", features = ["small_rng"] }
 thiserror = "1.0.61"
 byteorder = "1.5.0"
 aes-gcm = "0.10.3"
-argon2-kdf = "1.5.2"
+argon2 = "0.5.3"
 chacha20poly1305 = { version = "0.10.1", features = ["reduced-round"] }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
 hkdf = "0.12.4"

@@ -1,4 +1,4 @@
-use argon2_kdf::Algorithm;
+use argon2::Params;
 use ed25519_dalek::SigningKey;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
@@ -51,18 +51,15 @@ impl AuthenticationPassword {
     }
 
     pub(crate) fn hashed(&self, salt: [u8; 16]) -> [u8; 20] {
-        argon2_kdf::Hasher::new()
-            .algorithm(Algorithm::Argon2id)
-            .custom_salt(&salt)
-            .hash_length(20)
-            .iterations(2)
-            .memory_cost_kib(65536)
-            .threads(1)
-            .hash(self.password.as_bytes())
-            .unwrap()
-            .as_bytes()
-            .try_into()
-            .unwrap()
+        let mut hash = [0u8; 20];
+        argon2::Argon2::new(
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            Params::new(65536, 2, 1, Some(20)).unwrap(),
+        )
+        .hash_password_into(self.password.as_bytes(), &salt, &mut hash)
+        .unwrap();
+        hash
     }
 }
 
