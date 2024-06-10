@@ -107,7 +107,7 @@ pub struct ReliableChannel {
     next_id: u64,
     max_in_flight: usize,
     in_flight: BinaryHeap<FragmentInFlight>,
-    per_packet_cooldown: Duration,
+    packet_resend_cooldown: Duration,
     acked: HashSet<u64>,
     acked_cutoff: u64,
 }
@@ -123,7 +123,7 @@ impl ReliableChannel {
             next_id: 0,
             max_in_flight: 32,
             in_flight: BinaryHeap::new(),
-            per_packet_cooldown: Duration::from_millis(120),
+            packet_resend_cooldown: Duration::from_millis(120),
             acked: HashSet::default(),
             acked_cutoff: 0,
         }
@@ -133,6 +133,10 @@ impl ReliableChannel {
         assert!(max_in_flight > 0 && max_in_flight < 255 * 8 + 1);
         self.max_in_flight = max_in_flight;
         self.assembler.set_max_in_flight(max_in_flight);
+    }
+
+    pub fn set_packet_resend_cooldown(&mut self, cooldown: Duration) {
+        self.packet_resend_cooldown = cooldown;
     }
 
     pub fn get_ack(&self) -> (u64, &[u8]) {
@@ -199,7 +203,7 @@ impl ReliableChannel {
         if let Some(in_flight) = self.in_flight.peek() {
             let now = Instant::now();
             if in_flight.last_sent.map_or(true, |l| {
-                now.saturating_duration_since(l) > self.per_packet_cooldown
+                now.saturating_duration_since(l) > self.packet_resend_cooldown
             }) {
                 let (oldest_unacked, ack_bitfield) = self.assembler.get_ack();
                 let mut fragment = self.in_flight.pop().unwrap();
@@ -227,7 +231,7 @@ impl ReliableChannel {
                 self.in_flight.push(fragment);
                 return Ok(size);
             } else {
-                return Err(Some(self.per_packet_cooldown.saturating_sub(
+                return Err(Some(self.packet_resend_cooldown.saturating_sub(
                     now.saturating_duration_since(in_flight.last_sent.unwrap()),
                 )));
             }

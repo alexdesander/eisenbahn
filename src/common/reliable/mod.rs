@@ -60,4 +60,10 @@ impl ReliableChannels {
     pub fn handle_ack(&mut self, channel: ReliableChannelId, oldest: u64, ack_field: &[u8]) {
         self.channels[channel.to_index()].ack(oldest, ack_field);
     }
+
+    pub fn set_packet_resend_cooldown(&mut self, cooldown: Duration) {
+        for channel in self.channels.iter_mut() {
+            channel.set_packet_resend_cooldown(cooldown);
+        }
+    }
 }

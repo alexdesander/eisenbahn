@@ -36,7 +36,9 @@ pub struct Connection {
     send_cool_down: Duration,
     last_received: Instant,
     last_latency_discovery: Option<(Instant, u32)>,
+
     latency: Duration,
+    packet_resend_cooldown: Duration,
 }
 
 impl Connection {
@@ -55,6 +57,7 @@ impl Connection {
             last_latency_discovery: None,
             // TODO: Discover latency at the connection building
             latency: Duration::from_millis(100),
+            packet_resend_cooldown: Duration::from_millis(125),
         }
     }
 
@@ -376,7 +379,7 @@ impl Connection {
             debug_assert!(false, "Invalid latency response siphash 1");
             return None;
         }
-        self.latency = last.elapsed();
+        self.set_latency(last.elapsed());
         self.last_received = Instant::now();
 
         // Build latency response 2
@@ -385,5 +388,11 @@ impl Connection {
         buf[9..13].copy_from_slice(&siphash.to_le_bytes()[..4]);
         self.last_latency_discovery = None;
         Some(13)
+    }
+
+    fn set_latency(&mut self, latency: Duration) {
+        self.latency = latency;
+        self.packet_resend_cooldown = Duration::from_secs_f32(latency.as_secs_f32() * 1.25);
+        self.reliable.set_packet_resend_cooldown(self.packet_resend_cooldown)
     }
 }
