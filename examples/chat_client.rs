@@ -1,7 +1,7 @@
 // DISCLAIMER: THIS CODE WAS BUILT IN A RUSH TO TEST THE PROTOTYPE
 // THIS DOES NOT REPRESENT THE QUALITY OF MY CODE OR THE EISENBAHN PROJECT
 
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 
 use clap::Parser;
 use eisenbahn::{

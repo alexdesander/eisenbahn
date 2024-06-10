@@ -1,9 +1,4 @@
-use std::{
-    io,
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{io, net::SocketAddr, time::Duration};
 
 use mio::net::UdpSocket;
 
@@ -11,6 +6,8 @@ use mio::net::UdpSocket;
 use super::network_testing::NetworkTesting;
 #[cfg(feature = "network_testing")]
 use std::sync::MutexGuard;
+#[cfg(feature = "network_testing")]
+use std::sync::{Arc, Mutex};
 
 #[cfg(not(feature = "network_testing"))]
 struct NetworkTesting;

@@ -9,7 +9,7 @@ use std::{
 
 use byteorder::WriteBytesExt;
 use crossbeam_channel::{TryRecvError, TrySendError};
-use mio::{net::UdpSocket, Events, Interest, Poll, Token, Waker};
+use mio::{Events, Interest, Poll, Token, Waker};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 use crate::common::{
