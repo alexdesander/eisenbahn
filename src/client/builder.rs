@@ -13,7 +13,7 @@ use ed25519_dalek::{ed25519::signature::Signer, VerifyingKey};
 use mio::{Poll, Waker};
 use rand::{thread_rng, Rng};
 use thiserror::Error;
-use x25519_dalek::{EphemeralSecret, PublicKey};
+use x25519_dalek::{EphemeralSecret, PublicKey, ReusableSecret};
 
 use crate::common::{
     constants::*,
@@ -25,7 +25,7 @@ use crate::common::{
         sym::SymCipherAlgorithm,
         Encryption,
     },
-    socket::{NetworkCircumstances, Socket},
+    socket::{NetworkConditions, Socket},
 };
 
 use super::{ClientCmd, ClientState, Received, ToSend, WAKE_TOKEN};
@@ -71,7 +71,7 @@ pub struct ClientBuilder {
     password_authentication: Option<AuthenticationPassword>,
     ca_authentication: Option<AuthenticationCA>,
     send_queue_max_pending_messages: usize,
-    network_circumstances: Option<Box<dyn NetworkCircumstances>>,
+    network_circumstances: Option<Box<dyn NetworkConditions>>,
 }
 
 impl ClientBuilder {
@@ -84,7 +84,7 @@ impl ClientBuilder {
             ],
             allow_none_cipher: false,
             version: (0, 0, 0),
-            handshake_timeout: Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(60),
             none_authentication: None,
             key_authentication: None,
             password_authentication: None,
@@ -166,9 +166,9 @@ impl ClientBuilder {
     }
 
     /// Only active with crate feature "network_testing"
-    pub fn with_network_circumstances(
+    pub fn with_network_conditions(
         mut self,
-        network_circumstances: Box<dyn NetworkCircumstances>,
+        network_circumstances: Box<dyn NetworkConditions>,
     ) -> Self {
         self.network_circumstances = Some(network_circumstances);
         self
@@ -183,245 +183,327 @@ impl ClientBuilder {
         socket.connect(server_address)?;
         let mut buf = [0u8; 1201];
 
-        // Send client hello
-        buf[0] |= PACKET_ID_CLIENT_HELLO << 4;
-        let mut b = &mut buf[1..];
-        b.write_all(MAGIC)?;
-        b.write_u8(self.preferred_ciphers.len() as u8)?;
-        for cipher in &self.preferred_ciphers {
-            b.write_u8(*cipher as u8)?;
-        }
-        let salt: u32 = thread_rng().gen();
-        b.write_u32::<byteorder::LittleEndian>(salt)?;
-        b.write_u32::<byteorder::LittleEndian>(self.version.0)?;
-        b.write_u32::<byteorder::LittleEndian>(self.version.1)?;
-        b.write_u32::<byteorder::LittleEndian>(self.version.2)?;
-        socket.send(&buf[..1200])?;
-
-        // Recv server hello
         let start = Instant::now();
-        socket.set_read_timeout(Some(self.handshake_timeout))?;
-        let size = match socket.recv(&mut buf) {
-            Ok(size) => size,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(ConnectError::TimedOut),
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => return Err(ConnectError::TimedOut),
-            Err(e) => return Err(ConnectError::IoError(e)),
-        };
-        if size != 37 && size != 58 {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid server hello packet size",
-            )));
-        }
-        if (&buf[9..13]).read_u32::<LittleEndian>()? != salt {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid server hello packet salt",
-            )));
-        }
-        if buf[0] >> 4 != PACKET_ID_SERVER_HELLO {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid server hello packet id",
-            )));
-        }
-        if buf[0] & 0b0000_1000 == 0 {
-            if size != 37 {
-                return Err(ConnectError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Invalid server hello packet size for version incompatibility server hello",
-                )));
+        let auth_kind: AuthenticationKind;
+        let server_pub_key: VerifyingKey;
+        let chosen_cipher: SymCipherAlgorithm;
+        let challenge: u32;
+        let salt = thread_rng().gen();
+        loop {
+            let time_left = self.handshake_timeout.saturating_sub(start.elapsed());
+            if time_left == Duration::ZERO {
+                return Err(ConnectError::TimedOut);
             }
-            let mut b = &buf[13..];
-            let min_supported_version = (
-                b.read_u32::<LittleEndian>()?,
-                b.read_u32::<LittleEndian>()?,
-                b.read_u32::<LittleEndian>()?,
-            );
-            let max_supported_version = (
-                b.read_u32::<LittleEndian>()?,
-                b.read_u32::<LittleEndian>()?,
-                b.read_u32::<LittleEndian>()?,
-            );
-            return Err(ConnectError::VersionIncompatibility {
-                min_supported_version,
-                max_supported_version,
-            });
-        }
-        let mut b = &buf[13..];
-        let challenge = b.read_u32::<LittleEndian>()?;
-        let Some(chosen_cipher) = SymCipherAlgorithm::from_u8(b.read_u8()?) else {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid chosen cipher in server hello",
-            )));
-        };
-        let Ok(server_pub_key) = VerifyingKey::from_bytes(b[..32].try_into().unwrap()) else {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Something went wrong while reading the server public key",
-            )));
-        };
-        if let Some(trusted_server_key) = trusted_server_key {
-            if server_pub_key != trusted_server_key {
-                return Err(ConnectError::KeyMismatch {
-                    received_key: server_pub_key,
+
+            // Send client hello
+            buf[0] |= PACKET_ID_CLIENT_HELLO << 4;
+            let mut b = &mut buf[1..];
+            b.write_all(MAGIC)?;
+            b.write_u8(self.preferred_ciphers.len() as u8)?;
+            for cipher in &self.preferred_ciphers {
+                b.write_u8(*cipher as u8)?;
+            }
+            b.write_u32::<byteorder::LittleEndian>(salt)?;
+            b.write_u32::<byteorder::LittleEndian>(self.version.0)?;
+            b.write_u32::<byteorder::LittleEndian>(self.version.1)?;
+            b.write_u32::<byteorder::LittleEndian>(self.version.2)?;
+            socket.send(&buf[..1200])?;
+
+            // Recv server hello
+            let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200);
+            socket.set_read_timeout(Some(time_out_time))?;
+            let size = match socket.recv(&mut buf) {
+                Ok(size) => size,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                    continue;
+                }
+                Err(e) => return Err(ConnectError::IoError(e)),
+            };
+            if size != 37 && size != 58 {
+                continue;
+            }
+            if (&buf[9..13]).read_u32::<LittleEndian>()? != salt {
+                continue;
+            }
+            if buf[0] >> 4 != PACKET_ID_SERVER_HELLO {
+                continue;
+            }
+            if buf[0] & 0b0000_1000 == 0 {
+                if size != 37 {
+                    continue;
+                }
+                let mut b = &buf[13..];
+                let min_supported_version = (
+                    b.read_u32::<LittleEndian>()?,
+                    b.read_u32::<LittleEndian>()?,
+                    b.read_u32::<LittleEndian>()?,
+                );
+                let max_supported_version = (
+                    b.read_u32::<LittleEndian>()?,
+                    b.read_u32::<LittleEndian>()?,
+                    b.read_u32::<LittleEndian>()?,
+                );
+                return Err(ConnectError::VersionIncompatibility {
+                    min_supported_version,
+                    max_supported_version,
                 });
             }
-        }
-        let Some(auth_kind) = AuthenticationKind::from_u8((buf[0] & 0b0000_0110) >> 1) else {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid authentication kind in server hello",
-            )));
-        };
-        if chosen_cipher == SymCipherAlgorithm::None {
-            if !self.allow_none_cipher {
-                return Err(ConnectError::NoneCipherNotAllowed);
-            }
-        }
-        match auth_kind {
-            AuthenticationKind::None => {
-                if self.none_authentication.is_none() {
-                    return Err(ConnectError::AuthenticationNotSupported(
-                        AuthenticationKind::None,
-                    ));
+            let mut b = &buf[13..];
+            challenge = b.read_u32::<LittleEndian>()?;
+            chosen_cipher = match SymCipherAlgorithm::from_u8(b.read_u8()?) {
+                Some(cipher) => cipher,
+                None => {
+                    return Err(ConnectError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Invalid chosen cipher in server hello",
+                    )));
+                }
+            };
+            server_pub_key = match VerifyingKey::from_bytes(b[..32].try_into().unwrap()) {
+                Ok(key) => key,
+                Err(_) => {
+                    return Err(ConnectError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Something went wrong while reading the server public key",
+                    )))
+                }
+            };
+            if let Some(trusted_server_key) = trusted_server_key {
+                if server_pub_key != trusted_server_key {
+                    return Err(ConnectError::KeyMismatch {
+                        received_key: server_pub_key,
+                    });
                 }
             }
-            AuthenticationKind::Password => {
-                if self.password_authentication.is_none() {
-                    return Err(ConnectError::AuthenticationNotSupported(
-                        AuthenticationKind::Password,
-                    ));
+            auth_kind = match AuthenticationKind::from_u8((buf[0] & 0b0000_0110) >> 1) {
+                Some(auth_kind) => auth_kind,
+                None => {
+                    return Err(ConnectError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "Invalid authentication kind in server hello",
+                    )))
+                }
+            };
+            if chosen_cipher == SymCipherAlgorithm::None {
+                if !self.allow_none_cipher {
+                    return Err(ConnectError::NoneCipherNotAllowed);
                 }
             }
-            AuthenticationKind::Key => {
-                if self.key_authentication.is_none() {
-                    return Err(ConnectError::AuthenticationNotSupported(
-                        AuthenticationKind::Key,
-                    ));
+            match auth_kind {
+                AuthenticationKind::None => {
+                    if self.none_authentication.is_none() {
+                        return Err(ConnectError::AuthenticationNotSupported(
+                            AuthenticationKind::None,
+                        ));
+                    }
+                }
+                AuthenticationKind::Password => {
+                    if self.password_authentication.is_none() {
+                        return Err(ConnectError::AuthenticationNotSupported(
+                            AuthenticationKind::Password,
+                        ));
+                    }
+                }
+                AuthenticationKind::Key => {
+                    if self.key_authentication.is_none() {
+                        return Err(ConnectError::AuthenticationNotSupported(
+                            AuthenticationKind::Key,
+                        ));
+                    }
+                }
+                AuthenticationKind::CA => {
+                    if self.ca_authentication.is_none() {
+                        return Err(ConnectError::AuthenticationNotSupported(
+                            AuthenticationKind::CA,
+                        ));
+                    }
                 }
             }
-            AuthenticationKind::CA => {
-                if self.ca_authentication.is_none() {
-                    return Err(ConnectError::AuthenticationNotSupported(
-                        AuthenticationKind::CA,
-                    ));
-                }
-            }
+            break;
         }
 
-        // Send connection request
-        let client_x25519_key = EphemeralSecret::random_from_rng(&mut thread_rng());
+        let client_x25519_key = ReusableSecret::random_from_rng(&mut thread_rng());
         let client_x25519_pub_key = PublicKey::from(&client_x25519_key);
-
-        buf[0] = PACKET_ID_CONNECTION_REQUEST << 4;
-        // We keep everything from time stamp to server siphash
-        let mut b = &mut buf[58..];
-        b.write_u32::<LittleEndian>((challenge << 1) ^ challenge)?;
-        b.write_all(client_x25519_pub_key.as_bytes())?;
-        let size;
-        match auth_kind {
-            AuthenticationKind::None => {
-                let auth = self.none_authentication.as_ref().unwrap();
-                b.write(auth.username.as_bytes())?;
-                size = 94 + auth.username.len();
-            }
-            AuthenticationKind::Key => {
-                let auth = self.key_authentication.as_ref().unwrap();
-                b.write(auth.username.as_bytes())?;
-                b.write(auth.key.as_bytes())?;
-                let offset = 126 + auth.username.len();
-                let signature = auth.key.sign(&buf[..offset]);
-                buf[offset..offset + 64].copy_from_slice(&signature.to_bytes());
-                size = offset + 64;
-            }
-            AuthenticationKind::CA => {
-                let auth = self.ca_authentication.as_ref().unwrap();
-                b.write(&auth.ticket)?;
-                size = 126;
-            }
-            AuthenticationKind::Password => {
-                size = 94;
-            }
-        }
-        socket.send(&buf[..size])?;
-
-        // Recv connection response
-        socket.set_read_timeout(Some(
-            self.handshake_timeout.saturating_sub(start.elapsed()) + Duration::from_millis(5),
-        ))?;
-        let size = match socket.recv(&mut buf) {
-            Ok(size) => size,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(ConnectError::TimedOut),
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => return Err(ConnectError::TimedOut),
-            Err(e) => return Err(ConnectError::IoError(e)),
-        };
-        if size < 117 || size > 1200 {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid connection response packet size",
-            )));
-        }
-        if buf[0] >> 4 != PACKET_ID_CONNECTION_RESPONSE {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid connection response packet id",
-            )));
-        }
-        let signature: [u8; 64] = buf[size - 64..size].try_into().unwrap();
-        if server_pub_key
-            .verify_strict(&buf[..size - 64], &signature.into())
-            .is_err()
-        {
-            return Err(ConnectError::SignatureIncorrect);
-        }
-        if (&buf[1..5]).read_u32::<LittleEndian>()? != salt {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid connection salt in connection response packet",
-            )));
-        }
-        let mut b = &buf[5..];
+        let encryption: Encryption;
         let mut password_salt = [0u8; 16];
-        b.read_exact(&mut password_salt)?;
+        loop {
+            let time_left = self.handshake_timeout.saturating_sub(start.elapsed());
+            if time_left == Duration::ZERO {
+                return Err(ConnectError::TimedOut);
+            }
+            // Send connection request
+            buf[0] = PACKET_ID_CONNECTION_REQUEST << 4;
+            // We keep everything from time stamp to server siphash
+            let mut b = &mut buf[58..];
+            b.write_u32::<LittleEndian>((challenge << 1) ^ challenge)?;
+            b.write_all(client_x25519_pub_key.as_bytes())?;
+            let size;
+            match auth_kind {
+                AuthenticationKind::None => {
+                    let auth = self.none_authentication.as_ref().unwrap();
+                    b.write(auth.username.as_bytes())?;
+                    size = 94 + auth.username.len();
+                }
+                AuthenticationKind::Key => {
+                    let auth = self.key_authentication.as_ref().unwrap();
+                    b.write(auth.username.as_bytes())?;
+                    b.write(auth.key.as_bytes())?;
+                    let offset = 126 + auth.username.len();
+                    let signature = auth.key.sign(&buf[..offset]);
+                    buf[offset..offset + 64].copy_from_slice(&signature.to_bytes());
+                    size = offset + 64;
+                }
+                AuthenticationKind::CA => {
+                    let auth = self.ca_authentication.as_ref().unwrap();
+                    b.write(&auth.ticket)?;
+                    size = 126;
+                }
+                AuthenticationKind::Password => {
+                    size = 94;
+                }
+            }
+            socket.send(&buf[..size])?;
 
-        let mut server_x25519_pub_key_bytes = [0u8; 32];
-        b.read_exact(&mut server_x25519_pub_key_bytes)?;
-        let server_x25519_pub_key = PublicKey::from(server_x25519_pub_key_bytes);
-        let shared_secret = client_x25519_key.diffie_hellman(&server_x25519_pub_key);
-        if !shared_secret.was_contributory() {
-            return Err(ConnectError::KeyExchangeWasNotContributory);
+            // Recv connection response
+            let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200);
+            socket.set_read_timeout(Some(time_out_time))?;
+            let size = match socket.recv(&mut buf) {
+                Ok(size) => size,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                    continue;
+                }
+                Err(e) => return Err(ConnectError::IoError(e)),
+            };
+            if size < 117 || size > 1200 {
+                continue;
+            }
+            if buf[0] >> 4 != PACKET_ID_CONNECTION_RESPONSE {
+                continue;
+            }
+            let signature: [u8; 64] = buf[size - 64..size].try_into().unwrap();
+            if server_pub_key
+                .verify_strict(&buf[..size - 64], &signature.into())
+                .is_err()
+            {
+                continue;
+            }
+            if (&buf[1..5]).read_u32::<LittleEndian>()? != salt {
+                continue;
+            }
+            let mut b = &buf[5..];
+            b.read_exact(&mut password_salt)?;
+
+            let mut server_x25519_pub_key_bytes = [0u8; 32];
+            b.read_exact(&mut server_x25519_pub_key_bytes)?;
+            let server_x25519_pub_key = PublicKey::from(server_x25519_pub_key_bytes);
+            let shared_secret = client_x25519_key.diffie_hellman(&server_x25519_pub_key);
+            if !shared_secret.was_contributory() {
+                return Err(ConnectError::KeyExchangeWasNotContributory);
+            }
+            encryption = Encryption::new(shared_secret, false, chosen_cipher);
+
+            if buf[0] & 0b0000_1000 == 0 {
+                let info = match size {
+                    x if x > 153 => {
+                        let mut info = buf[153..size - 64 - 16].to_vec();
+                        let tag = &buf[size - 64 - 16..size - 64];
+                        if !encryption.decrypt(&NONCE_CONNECTION_RESPONSE, &[], &mut info, &tag) {
+                            return Err(ConnectError::DecryptionError);
+                        }
+                        info
+                    }
+                    _ => Vec::new(),
+                };
+                return Err(ConnectError::ConnectionDenied { info });
+            }
+
+            if auth_kind != AuthenticationKind::Password {
+                let info = match size {
+                    x if x > 153 => {
+                        let mut info = buf[153..size - 64 - 16].to_vec();
+                        let tag = &buf[size - 64 - 16..size - 64];
+                        if !encryption.decrypt(&NONCE_CONNECTION_RESPONSE, &[], &mut info, &tag) {
+                            return Err(ConnectError::DecryptionError);
+                        }
+                        info
+                    }
+                    _ => Vec::new(),
+                };
+                return Ok(EisenbahnClient::new(
+                    socket,
+                    server_address,
+                    self.network_circumstances,
+                    encryption,
+                    self.send_queue_max_pending_messages,
+                ));
+            }
+            break;
         }
-        let encryption = Encryption::new(shared_secret, false, chosen_cipher);
 
-        if buf[0] & 0b0000_1000 == 0 {
+        loop {
+            let time_left = self.handshake_timeout.saturating_sub(start.elapsed());
+            if time_left == Duration::ZERO {
+                return Err(ConnectError::TimedOut);
+            }
+            // If we get here, we need to do the additional password authentication steps
+            // Send password request
+            buf[0] = PACKET_ID_PASSWORD_REQUEST << 4;
+            // Salt is already in the buffer
+            let password_auth = self.password_authentication.as_ref().unwrap();
+            let username = password_auth.username.as_bytes();
+            let password_hash = password_auth.hashed(password_salt);
+            let mut b = &mut buf[5..];
+            b.write_all(username)?;
+            b.write_all(&password_hash)?;
+            let tag_offset = 5 + username.len() + password_hash.len();
+            let aad: [u8; 5] = buf[..5].try_into().unwrap();
+            let tag = encryption.encrypt(&NONCE_PASSWORD_REQUEST, &aad, &mut buf[5..tag_offset]);
+            buf[tag_offset..tag_offset + 16].copy_from_slice(&tag);
+            socket.send(&buf[..tag_offset + 16])?;
+
+            // Recv password response
+            let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200);
+            socket.set_read_timeout(Some(time_out_time))?;
+            let size = match socket.recv(&mut buf) {
+                Ok(size) => size,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    continue;
+                }
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                    continue;
+                }
+                Err(e) => return Err(ConnectError::IoError(e)),
+            };
+            if (size != 5 && size < 22) || size > 1200 {
+                continue;
+            }
+            if buf[0] >> 4 != PACKET_ID_PASSWORD_RESPONSE {
+                continue;
+            }
+            if (&buf[1..5]).read_u32::<LittleEndian>()? != salt {
+                continue;
+            }
             let info = match size {
-                x if x > 153 => {
-                    let mut info = buf[153..size - 64 - 16].to_vec();
-                    let tag = &buf[size - 64 - 16..size - 64];
-                    if !encryption.decrypt(&NONCE_CONNECTION_RESPONSE, &[], &mut info, &tag) {
+                x if x > 5 => {
+                    let mut info = buf[5..size].to_vec();
+                    let aad: [u8; 5] = buf[..5].try_into().unwrap();
+                    let tag = &buf[size - 16..size];
+                    if !encryption.decrypt(&NONCE_PASSWORD_RESPONSE, &aad, &mut info, &tag) {
                         return Err(ConnectError::DecryptionError);
                     }
                     info
                 }
                 _ => Vec::new(),
             };
-            return Err(ConnectError::ConnectionDenied { info });
-        }
-
-        if auth_kind != AuthenticationKind::Password {
-            let info = match size {
-                x if x > 153 => {
-                    let mut info = buf[153..size - 64 - 16].to_vec();
-                    let tag = &buf[size - 64 - 16..size - 64];
-                    if !encryption.decrypt(&NONCE_CONNECTION_RESPONSE, &[], &mut info, &tag) {
-                        return Err(ConnectError::DecryptionError);
-                    }
-                    info
-                }
-                _ => Vec::new(),
-            };
+            if buf[0] | 0b0000_1000 != 1 {
+                return Err(ConnectError::ConnectionDenied { info });
+            }
             return Ok(EisenbahnClient::new(
                 socket,
                 server_address,
@@ -430,73 +512,6 @@ impl ClientBuilder {
                 self.send_queue_max_pending_messages,
             ));
         }
-
-        // If we get here, we need to do the additional password authentication steps
-        // Send password request
-        buf[0] = PACKET_ID_PASSWORD_REQUEST << 4;
-        // Salt is already in the buffer
-        let password_auth = self.password_authentication.as_ref().unwrap();
-        let username = password_auth.username.as_bytes();
-        let password_hash = password_auth.hashed(password_salt);
-        let mut b = &mut buf[5..];
-        b.write_all(username)?;
-        b.write_all(&password_hash)?;
-        let tag_offset = 5 + username.len() + password_hash.len();
-        let aad: [u8; 5] = buf[..5].try_into().unwrap();
-        let tag = encryption.encrypt(&NONCE_PASSWORD_REQUEST, &aad, &mut buf[5..tag_offset]);
-        buf[tag_offset..tag_offset + 16].copy_from_slice(&tag);
-        socket.send(&buf[..tag_offset + 16])?;
-
-        // Recv password response
-        socket.set_read_timeout(Some(
-            start.elapsed().saturating_sub(self.handshake_timeout) + Duration::from_millis(5),
-        ))?;
-        let size = match socket.recv(&mut buf) {
-            Ok(size) => size,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(ConnectError::TimedOut),
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => return Err(ConnectError::TimedOut),
-            Err(e) => return Err(ConnectError::IoError(e)),
-        };
-        if (size != 5 && size < 22) || size > 1200 {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid password response packet size",
-            )));
-        }
-        if buf[0] >> 4 != PACKET_ID_PASSWORD_RESPONSE {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid password response packet id",
-            )));
-        }
-        if (&buf[1..5]).read_u32::<LittleEndian>()? != salt {
-            return Err(ConnectError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid password response packet salt",
-            )));
-        }
-        let info = match size {
-            x if x > 5 => {
-                let mut info = buf[5..size].to_vec();
-                let aad: [u8; 5] = buf[..5].try_into().unwrap();
-                let tag = &buf[size - 16..size];
-                if !encryption.decrypt(&NONCE_PASSWORD_RESPONSE, &aad, &mut info, &tag) {
-                    return Err(ConnectError::DecryptionError);
-                }
-                info
-            }
-            _ => Vec::new(),
-        };
-        if buf[0] | 0b0000_1000 != 1 {
-            return Err(ConnectError::ConnectionDenied { info });
-        }
-        Ok(EisenbahnClient::new(
-            socket,
-            server_address,
-            self.network_circumstances,
-            encryption,
-            self.send_queue_max_pending_messages,
-        ))
     }
 }
 
@@ -527,7 +542,7 @@ impl EisenbahnClient {
     pub fn new(
         socket: UdpSocket,
         server_addr: SocketAddr,
-        network_circumstances: Option<Box<dyn NetworkCircumstances>>,
+        network_circumstances: Option<Box<dyn NetworkConditions>>,
         encryption: Encryption,
         send_queue_max_pending_messages: usize,
     ) -> Self {

@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::common::{
     encryption::{auth::AuthenticationKind, sym::SymCipherAlgorithm},
-    socket::{NetworkCircumstances, Socket},
+    socket::{NetworkConditions, Socket},
 };
 
 use super::{
@@ -52,7 +52,7 @@ pub struct ServerBuilder {
     password_salt: [u8; 16],
     packet_receive_queue_size: usize,
     max_pending_messages_per_connection: usize,
-    network_circumstances: Option<Box<dyn NetworkCircumstances>>,
+    network_circumstances: Option<Box<dyn NetworkConditions>>,
 }
 
 impl ServerBuilder {
@@ -145,9 +145,9 @@ impl ServerBuilder {
     }
 
     /// Only active with crate feature "network_testing"
-    pub fn with_network_circumstances(
+    pub fn with_network_conditions(
         mut self,
-        network_circumstances: Box<dyn NetworkCircumstances>,
+        network_circumstances: Box<dyn NetworkConditions>,
     ) -> Self {
         self.network_circumstances = Some(network_circumstances);
         self

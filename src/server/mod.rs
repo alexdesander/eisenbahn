@@ -461,7 +461,6 @@ impl State {
 
     fn handle_payload(&mut self, size: usize, addr: SocketAddr) -> bool {
         let Some(con) = self.connections.get_mut(&addr) else {
-            debug_assert!(false, "Connection not found");
             return false;
         };
         for message in con.handle_payload_packet(&mut self.buf[..size], &mut self.events) {
@@ -478,7 +477,6 @@ impl State {
 
     fn handle_ack_only(&mut self, size: usize, addr: SocketAddr) -> bool {
         let Some(con) = self.connections.get_mut(&addr) else {
-            debug_assert!(false, "Connection not found");
             return false;
         };
         con.handle_ack_only(&mut self.buf[..size]);
@@ -487,7 +485,6 @@ impl State {
 
     fn handle_disconnect(&mut self, size: usize, addr: SocketAddr) -> bool {
         let Some(con) = self.connections.get_mut(&addr) else {
-            debug_assert!(false, "Connection not found");
             return false;
         };
         if let Some((reason, data)) = con.handle_disconnect(&mut self.buf[..size]) {
@@ -505,7 +502,6 @@ impl State {
 
     fn handle_latency_response(&mut self, size: usize, addr: SocketAddr) -> bool {
         let Some(con) = self.connections.get_mut(&addr) else {
-            debug_assert!(false, "Connection not found");
             return false;
         };
         let Some(size) = con.handle_latency_response(&mut self.buf[..size]) else {
@@ -564,7 +560,6 @@ impl State {
         let received_siphash: u64 = (&self.buf[50..58]).read_u64::<LittleEndian>().unwrap();
         let siphash = self.siphasher.hash(&self.buf[1..49]);
         if siphash != received_siphash {
-            debug_assert!(false, "Invalid siphash");
             return false;
         }
         let mut b = &self.buf[1..];
@@ -579,13 +574,11 @@ impl State {
         let salt = b.read_u32::<LittleEndian>().unwrap();
         let challenge = b.read_u32::<LittleEndian>().unwrap();
         let Some(cipher) = SymCipherAlgorithm::from_u8(b.read_u8().unwrap()) else {
-            debug_assert!(false, "Invalid cipher");
             return false;
         };
         let mut b = &self.buf[58..];
         let challenge_result = b.read_u32::<LittleEndian>().unwrap();
         if challenge_result != ((challenge << 1) ^ challenge) {
-            debug_assert!(false, "Invalid challenge");
             return false;
         }
         let mut client_x25519_pub_key = [0u8; 32];
@@ -602,16 +595,13 @@ impl State {
             }
             AuthenticationKind::None => {
                 if size <= 94 {
-                    debug_assert!(false, "Invalid connection request packet size");
                     return false;
                 }
                 let username = &self.buf[94..size];
                 let Ok(username) = String::from_utf8(username.to_vec()) else {
-                    debug_assert!(false, "Invalid username utf-8");
                     return false;
                 };
                 if self.auth_cmds.len() >= 250 {
-                    debug_assert!(false, "Too many connections");
                     return false;
                 }
                 if self
@@ -631,12 +621,10 @@ impl State {
             }
             AuthenticationKind::Key => {
                 if size <= 94 + 32 + 64 {
-                    debug_assert!(false, "Invalid connection request packet size");
                     return false;
                 }
                 let username = &self.buf[94..size - 32 - 64];
                 let Ok(username) = String::from_utf8(username.to_vec()) else {
-                    debug_assert!(false, "Invalid username utf-8");
                     return false;
                 };
                 let player_public_key_bytes: [u8; 32] =
@@ -644,18 +632,15 @@ impl State {
                 let client_signature: [u8; 64] = self.buf[size - 64..size].try_into().unwrap();
                 let Ok(player_public_key) = VerifyingKey::from_bytes(&player_public_key_bytes)
                 else {
-                    debug_assert!(false, "Invalid player public key");
                     return false;
                 };
                 if player_public_key
                     .verify_strict(&self.buf[..size - 64], &client_signature.into())
                     .is_err()
                 {
-                    debug_assert!(false, "Invalid player public key signature");
                     return false;
                 }
                 if self.auth_cmds.len() >= 250 {
-                    debug_assert!(false, "Too many connections");
                     return false;
                 }
                 if self
@@ -676,12 +661,10 @@ impl State {
             }
             AuthenticationKind::CA => {
                 if size != 94 + 32 {
-                    debug_assert!(false, "Invalid connection request packet size");
                     return false;
                 }
                 let ticket: [u8; 32] = self.buf[94..size].try_into().unwrap();
                 if self.auth_cmds.len() >= 250 {
-                    debug_assert!(false, "Too many connections");
                     return false;
                 }
                 if self
@@ -704,14 +687,9 @@ impl State {
 
     fn handle_password_request(&mut self, size: usize, addr: SocketAddr) -> bool {
         if self.auth_kind != AuthenticationKind::Password {
-            debug_assert!(
-                false,
-                "Password request received but server does not use password authentication."
-            );
             return false;
         }
         if size < 41 || size > 296 {
-            debug_assert!(false, "Invalid password request packet size");
             return false;
         }
         let mut b = &self.buf[1..];
@@ -719,7 +697,6 @@ impl State {
         let encryption = match self.expected_password_requests.remove(&(addr, salt)) {
             Some(ciphers) => ciphers,
             None => {
-                debug_assert!(false, "Password request not expected.");
                 return false;
             }
         };
@@ -731,16 +708,13 @@ impl State {
             &mut self.buf[5..size - 16],
             &tag,
         ) {
-            debug_assert!(false, "Unable to decrypt password request");
             return false;
         }
         let password_hash: [u8; 20] = self.buf[size - 16 - 20..size - 16].try_into().unwrap();
         let Ok(player_name) = String::from_utf8(self.buf[5..size - 16 - 20].to_vec()) else {
-            debug_assert!(false, "Invalid username utf-8 encoding.");
             return false;
         };
         if self.auth_cmds.len() >= 250 {
-            debug_assert!(false, "Too many connections");
             return false;
         }
         if self
@@ -821,7 +795,6 @@ impl State {
 
         let shared_secret = server_x25519_key.diffie_hellman(&client_x25519_pub_key);
         if !shared_secret.was_contributory() {
-            debug_assert!(false, "Invalid shared secret");
             return false;
         }
         let encryption = Encryption::new(shared_secret, true, cipher);
@@ -912,7 +885,6 @@ impl State {
                 self.buf[53..53 + 64].copy_from_slice(&signature.to_bytes());
 
                 if self.expected_password_requests.contains_key(&(addr, salt)) {
-                    debug_assert!(false, "Expected password request doesn't exist");
                     return false;
                 }
                 self.expected_password_requests

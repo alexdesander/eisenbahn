@@ -73,11 +73,14 @@ impl SendQueueInner {
     }
 
     pub fn add(&mut self, addr: SocketAddr) {
-        assert!(!self.send_queue_txs.contains_key(&addr));
-        assert!(!self.send_queue_rxs.contains_key(&addr));
+        if self.send_queue_txs.contains_key(&addr) || self.send_queue_rxs.contains_key(&addr) {
+            assert!(self.send_queue_txs.contains_key(&addr));
+            assert!(self.send_queue_rxs.contains_key(&addr));
+            return;
+        }
         let (tx, rx) = crossbeam_channel::bounded(self.max_pending_msgs);
-        assert!(self.send_queue_txs.insert(addr, tx).is_none());
-        assert!(self.send_queue_rxs.insert(addr, rx).is_none());
+        self.send_queue_txs.insert(addr, tx);
+        self.send_queue_rxs.insert(addr, rx);
     }
 
     pub fn remove(&mut self, addr: SocketAddr) {

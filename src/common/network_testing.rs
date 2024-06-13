@@ -9,7 +9,7 @@ use std::{
 use crossbeam_channel::RecvTimeoutError;
 use mio::net::UdpSocket;
 
-use super::socket::{NetworkCircumstances, PerfectNetworkCircumstances};
+use super::socket::{NetworkConditions, PerfectNetworkCircumstances};
 
 pub(crate) struct TimedEvent {
     deadline: Instant,
@@ -41,13 +41,13 @@ pub(crate) enum Event {
 }
 
 pub struct NetworkTesting {
-    inner: Box<dyn NetworkCircumstances>,
+    inner: Box<dyn NetworkConditions>,
     to_send_tx: crossbeam_channel::Sender<(SocketAddr, Vec<u8>, Duration)>,
     send_thread: JoinHandle<()>,
 }
 
 impl NetworkTesting {
-    pub fn new(socket: Arc<Mutex<UdpSocket>>, inner: Box<dyn NetworkCircumstances>) -> Self {
+    pub fn new(socket: Arc<Mutex<UdpSocket>>, inner: Box<dyn NetworkConditions>) -> Self {
         let (to_send_tx, to_send_rx) = crossbeam_channel::unbounded();
         let send_thread = std::thread::spawn(move || {
             let mut timed_events: BinaryHeap<TimedEvent> = BinaryHeap::new();

@@ -3,7 +3,7 @@ use std::{
     io::Write,
     net::SocketAddr,
     rc::Rc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use byteorder::WriteBytesExt;
@@ -345,11 +345,15 @@ impl Connection {
 
     pub fn build_latency_discovery(&mut self, buf: &mut [u8]) -> usize {
         buf[0] = PACKET_ID_LATENCY_DISCOVERY << 4;
-        let salt: u32 = thread_rng().gen();
-        buf[1..5].copy_from_slice(&salt.to_le_bytes());
+        // Truncate to u32, doesn't matter because we only look at the difference of timestamps
+        let time_stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+        buf[1..5].copy_from_slice(&time_stamp.to_le_bytes());
         let siphash = self.encryption.siphash_out(&buf[1..5]);
         buf[5..9].copy_from_slice(&siphash.to_le_bytes()[..4]);
-        self.last_latency_discovery = Some((Instant::now(), salt));
+        self.last_latency_discovery = Some((Instant::now(), time_stamp));
         9
     }
 
@@ -361,11 +365,11 @@ impl Connection {
             debug_assert!(false, "Invalid latency response length");
             return None;
         }
-        let Some((last, salt)) = self.last_latency_discovery else {
+        let Some((last, time_stamp)) = self.last_latency_discovery else {
             debug_assert!(false, "No latency discovery sent before latency response");
             return None;
         };
-        if buf[1..5] != salt.to_le_bytes() {
+        if buf[1..5] != time_stamp.to_le_bytes() {
             debug_assert!(false, "Invalid latency response salt");
             return None;
         }

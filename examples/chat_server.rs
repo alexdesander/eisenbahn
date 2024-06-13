@@ -6,19 +6,44 @@ use std::net::SocketAddr;
 use ahash::HashMap;
 use ed25519_dalek::SigningKey;
 use eisenbahn::{
-    common::constants::Channel,
+    common::{constants::Channel, socket::NetworkConditions},
     server::{
         auth::{AuthenticationResult, Authenticator, NoneAuthenticator},
         builder::{Received, ServerBuilder, ToSend},
         send_queue::SendError,
     },
 };
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 struct MockNoneAuthenticator;
 
 impl NoneAuthenticator for MockNoneAuthenticator {
     fn authenticate(&mut self, player_name: &str) -> AuthenticationResult {
         AuthenticationResult::Success { payload: vec![] }
+    }
+}
+
+struct TerribleNetworkConditions {
+    rng: SmallRng,
+}
+
+impl TerribleNetworkConditions {
+    fn new() -> Self {
+        Self {
+            rng: SmallRng::from_entropy(),
+        }
+    }
+}
+
+impl NetworkConditions for TerribleNetworkConditions {
+    fn simulate_packet_loss(&mut self, _packet_size: usize) -> bool {
+        // 25% packet loss
+        self.rng.gen_bool(0.25)
+    }
+
+    fn simulate_packet_latency(&mut self, _packet_size: usize) -> std::time::Duration {
+        // 80-120ms latency
+        std::time::Duration::from_millis(self.rng.gen_range(80..120))
     }
 }
 
@@ -31,6 +56,7 @@ fn main() {
         signing_key,
         [0; 16],
     )
+    .with_network_conditions(Box::new(TerribleNetworkConditions::new()))
     .run()
     .unwrap();
 

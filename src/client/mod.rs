@@ -4,7 +4,7 @@ use std::{
     ops::DerefMut,
     rc::Rc,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use byteorder::WriteBytesExt;
@@ -608,14 +608,22 @@ impl ClientState {
             debug_assert!(false, "Invalid siphash in latency discovery packet");
             return false;
         }
-        let salt_bytes: [u8; 4] = self.buf[1..5].try_into().unwrap();
-        let salt = u32::from_le_bytes(salt_bytes);
+        let time_stamp_bytes: [u8; 4] = self.buf[1..5].try_into().unwrap();
+        let time_stamp = u32::from_le_bytes(time_stamp_bytes);
+        let real_time_stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+
+        if time_stamp + 5 < real_time_stamp {
+            return false;
+        }
 
         // Send latency response
         self.buf[0] = PACKET_ID_LATENCY_RESPONSE << 4;
         let siphash = self.encryption.siphash_out(&self.buf[1..9]);
         self.buf[9..13].copy_from_slice(&siphash.to_le_bytes()[..4]);
-        self.last_latency_discovery = Some((Instant::now(), salt));
+        self.last_latency_discovery = Some((Instant::now(), time_stamp));
         self.last_received = Instant::now();
         if self.socket.send(&self.buf[..13]).is_err() {
             return true;
@@ -624,7 +632,7 @@ impl ClientState {
     }
 
     fn handle_latency_response_2(&mut self, size: usize) -> bool {
-        let Some((last, salt)) = self.last_latency_discovery else {
+        let Some((last, time_stamp)) = self.last_latency_discovery else {
             debug_assert!(
                 false,
                 "Received latency response 2 without sending discovery packet"
@@ -640,7 +648,7 @@ impl ClientState {
             debug_assert!(false, "Invalid siphash in latency discovery packet 0");
             return false;
         }
-        if salt.to_le_bytes() != self.buf[1..5] {
+        if time_stamp.to_le_bytes() != self.buf[1..5] {
             debug_assert!(false, "Invalid salt in latency response 2 packet");
             return false;
         }

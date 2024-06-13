@@ -6,9 +6,7 @@ use std::net::SocketAddr;
 use clap::Parser;
 use eisenbahn::{
     client::{builder::ClientBuilder, Received, ToSend},
-    common::{
-        constants::Channel, encryption::auth::AuthenticationNone, socket::NetworkCircumstances,
-    },
+    common::{constants::Channel, encryption::auth::AuthenticationNone, socket::NetworkConditions},
 };
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use text_io::read;
@@ -31,15 +29,15 @@ impl TerribleNetworkConditions {
     }
 }
 
-impl NetworkCircumstances for TerribleNetworkConditions {
+impl NetworkConditions for TerribleNetworkConditions {
     fn simulate_packet_loss(&mut self, _packet_size: usize) -> bool {
-        // 60% packet loss
-        self.rng.gen_bool(0.6)
+        // 25% packet loss
+        self.rng.gen_bool(0.25)
     }
 
     fn simulate_packet_latency(&mut self, _packet_size: usize) -> std::time::Duration {
-        // 10-2000ms latency
-        std::time::Duration::from_millis(self.rng.gen_range(10..2000))
+        // 80-120ms latency
+        std::time::Duration::from_millis(self.rng.gen_range(80..120))
     }
 }
 
@@ -47,7 +45,7 @@ pub fn main() {
     let args = Args::parse();
     let client = ClientBuilder::new()
         .with_none_authentication(Some(AuthenticationNone::new(args.username)))
-        .with_network_circumstances(Box::new(TerribleNetworkConditions::new()))
+        .with_network_conditions(Box::new(TerribleNetworkConditions::new()))
         .connect(args.ip, None)
         .unwrap();
 

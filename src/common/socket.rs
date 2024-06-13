@@ -19,7 +19,7 @@ impl NetworkTesting {
     }
 }
 
-pub trait NetworkCircumstances: Send {
+pub trait NetworkConditions: Send {
     /// Whether or not the packet should be dropped before sending.
     /// Does not affect receiving.
     fn simulate_packet_loss(&mut self, packet_size: usize) -> bool;
@@ -31,7 +31,7 @@ pub trait NetworkCircumstances: Send {
 #[derive(Clone)]
 pub struct PerfectNetworkCircumstances;
 
-impl NetworkCircumstances for PerfectNetworkCircumstances {
+impl NetworkConditions for PerfectNetworkCircumstances {
     fn simulate_packet_loss(&mut self, _packet_size: usize) -> bool {
         false
     }
@@ -58,7 +58,7 @@ pub struct Socket {
 impl Socket {
     pub fn new(
         socket: std::net::UdpSocket,
-        network_circumstances: Option<Box<dyn NetworkCircumstances>>,
+        network_circumstances: Option<Box<dyn NetworkConditions>>,
     ) -> Result<Self, io::Error> {
         socket.set_nonblocking(true)?;
         #[cfg(feature = "network_testing")]
