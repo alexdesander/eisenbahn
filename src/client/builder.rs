@@ -13,7 +13,7 @@ use ed25519_dalek::{ed25519::signature::Signer, VerifyingKey};
 use mio::{Poll, Waker};
 use rand::{thread_rng, Rng};
 use thiserror::Error;
-use x25519_dalek::{EphemeralSecret, PublicKey, ReusableSecret};
+use x25519_dalek::{PublicKey, ReusableSecret};
 
 use crate::common::{
     constants::*,

@@ -45,7 +45,7 @@ impl PacketAssembler {
         Self {
             max_in_flight,
             lowest_needed: 0,
-            ack_bitfield: BitVec::repeat(false, max_in_flight - 1),
+            ack_bitfield: BitVec::repeat(false, max_in_flight),
             available: BinaryHeap::new(),
             message: Vec::new(),
             still_needed: None,

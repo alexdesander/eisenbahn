@@ -7,7 +7,6 @@ use std::{
 };
 
 use byteorder::WriteBytesExt;
-use rand::{thread_rng, Rng};
 
 use crate::{
     common::{
@@ -37,7 +36,7 @@ pub struct Connection {
     last_received: Instant,
     last_latency_discovery: Option<(Instant, u32)>,
 
-    latency: Duration,
+    pub latency: Duration,
     packet_resend_cooldown: Duration,
 }
 
@@ -50,9 +49,9 @@ impl Connection {
             reliable: ReliableChannels::new(encryption),
             ack_manager: AckManager::new(),
             has_ack_event_queued: false,
-            ack_only_delay: Duration::from_millis(100),
+            ack_only_delay: Duration::from_millis(30),
             is_currently_sending: false,
-            send_cool_down: Duration::from_micros(50),
+            send_cool_down: Duration::from_micros(1),
             last_received: Instant::now(),
             last_latency_discovery: None,
             // TODO: Discover latency at the connection building
@@ -396,8 +395,5 @@ impl Connection {
 
     fn set_latency(&mut self, latency: Duration) {
         self.latency = latency;
-        self.packet_resend_cooldown = Duration::from_secs_f32(latency.as_secs_f32() * 1.25);
-        self.reliable
-            .set_packet_resend_cooldown(self.packet_resend_cooldown)
     }
 }

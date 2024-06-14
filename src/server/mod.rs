@@ -4,13 +4,13 @@ use std::{
     net::SocketAddr,
     ops::DerefMut,
     rc::Rc,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use ahash::HashMap;
 use auth::AuthCmd;
-use builder::{CipherPolicy, Received, ToSend};
+use builder::{CipherPolicy, Received, ServerInfo, ToSend};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use connection::Connection;
 use crossbeam_channel::TryRecvError;
@@ -76,6 +76,7 @@ impl Ord for TimedEvent {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum Event {
     RemoveExpectedPasswordRequest(SocketAddr, u32),
     SendAckOnly(SocketAddr),
@@ -130,6 +131,8 @@ pub(crate) struct State {
     timeout_duration: Duration,
     is_checking_for_timeouts: bool,
     latency_discovery_cooldown: Duration,
+
+    server_info: Arc<Mutex<ServerInfo>>,
 }
 
 impl State {
@@ -149,6 +152,7 @@ impl State {
         password_salt: [u8; 16],
         send_queue: SendQueue,
         recv_queue_tx: crossbeam_channel::Sender<(SocketAddr, Received)>,
+        server_info: Arc<Mutex<ServerInfo>>,
     ) -> Self {
         State {
             poll,
@@ -179,6 +183,8 @@ impl State {
             timeout_duration: Duration::from_secs(12),
             is_checking_for_timeouts: false,
             latency_discovery_cooldown: Duration::from_secs(2),
+
+            server_info,
         }
     }
 
@@ -192,8 +198,13 @@ impl State {
 
         loop {
             //TODO: Better timeout handling and waking
+            let time_to_wait = match self.events.peek() {
+                Some(e) => e.deadline.saturating_duration_since(Instant::now()),
+                None => Duration::from_micros(20),
+            };
+
             self.poll
-                .poll(&mut events, Some(Duration::from_millis(10)))?;
+                .poll(&mut events, Some(time_to_wait))?;
 
             for event in events.iter() {
                 match event.token() {
@@ -342,8 +353,9 @@ impl State {
 
     fn handle_all_events(&mut self) -> Result<bool, io::Error> {
         let now = Instant::now();
+        let now_tolerance = Duration::from_micros(500);
         loop {
-            if self.events.peek().map(|e| e.deadline > now).unwrap_or(true) {
+            if self.events.peek().map(|e| e.deadline > now + now_tolerance).unwrap_or(true) {
                 break;
             }
             let event = self.events.pop().unwrap().event;
@@ -507,6 +519,7 @@ impl State {
         let Some(size) = con.handle_latency_response(&mut self.buf[..size]) else {
             return false;
         };
+        self.server_info.lock().unwrap().get_con_info_mut(&addr).unwrap().latency = con.latency;
         if self.socket.send_to(addr, &self.buf[..size]).is_err() {
             return true;
         }
@@ -840,6 +853,7 @@ impl State {
                     addr,
                     Connection::new(addr, player_name.clone(), Rc::new(encryption)),
                 );
+                self.server_info.lock().unwrap().new_con(addr, player_name.clone());
                 if !self.is_checking_for_timeouts {
                     self.is_checking_for_timeouts = true;
                     self.events.push(TimedEvent {
@@ -925,6 +939,7 @@ impl State {
                 addr,
                 Connection::new(addr, player_name.clone(), Rc::new(encryption)),
             );
+            self.server_info.lock().unwrap().new_con(addr, player_name.clone());
             if !self.is_checking_for_timeouts {
                 self.is_checking_for_timeouts = true;
                 self.events.push(TimedEvent {

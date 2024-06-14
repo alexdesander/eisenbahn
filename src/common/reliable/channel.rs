@@ -65,6 +65,7 @@ impl ReliableChannelId {
 
 /// Represents a fragment that is currently in flight.
 /// In flight means that the fragment is being sent/has been sent, but has not been acknowledged yet.
+#[derive(Debug)]
 struct FragmentInFlight {
     last_sent: Option<Instant>,
     id: u64,
@@ -117,13 +118,13 @@ impl ReliableChannel {
         Self {
             id,
             encryption: encryption.clone(),
-            assembler: PacketAssembler::new(32),
+            assembler: PacketAssembler::new(128),
             disassembler: MessageDisassembler::new(),
 
             next_id: 0,
-            max_in_flight: 32,
+            max_in_flight: 128,
             in_flight: BinaryHeap::new(),
-            packet_resend_cooldown: Duration::from_millis(120),
+            packet_resend_cooldown: Duration::from_millis(125),
             acked: HashSet::default(),
             acked_cutoff: 0,
         }

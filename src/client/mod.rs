@@ -131,18 +131,18 @@ impl ClientState {
             reliable: ReliableChannels::new(encryption),
             ack_manager: AckManager::new(),
             has_ack_event_queued: false,
-            ack_only_delay: Duration::from_millis(100),
+            ack_only_delay: Duration::from_millis(30),
             to_send_rx,
             received_tx,
             is_sending: false,
             last_sent: Instant::now(),
             last_received: Instant::now(),
-            send_cooldown: Duration::from_micros(50),
+            send_cooldown: Duration::from_micros(5),
             timeout_duration: Duration::from_secs(10),
             last_latency_discovery: None,
 
             latency: Duration::from_millis(100),
-            packet_resend_cooldown: Duration::from_micros(125),
+            packet_resend_cooldown: Duration::from_millis(125),
         }
     }
 
@@ -162,8 +162,13 @@ impl ClientState {
 
         loop {
             //TODO: Better timeout handling and waking
+            let time_to_wait = match self.events.peek() {
+                Some(e) => e.deadline.saturating_duration_since(Instant::now()),
+                None => Duration::from_micros(20),
+            };
+
             self.poll
-                .poll(&mut events, Some(Duration::from_millis(10)))?;
+                .poll(&mut events, Some(time_to_wait))?;
 
             for event in events.iter() {
                 match event.token() {
@@ -241,8 +246,9 @@ impl ClientState {
 
     fn handle_all_events(&mut self) -> Result<bool, io::Error> {
         let now = Instant::now();
+        let now_tolerance = Duration::from_micros(500);
         loop {
-            if self.events.peek().map(|e| e.deadline > now).unwrap_or(true) {
+            if self.events.peek().map(|e| e.deadline > now + now_tolerance).unwrap_or(true) {
                 break;
             }
             let event = self.events.pop().unwrap().event;
@@ -665,8 +671,5 @@ impl ClientState {
 
     fn set_latency(&mut self, latency: Duration) {
         self.latency = latency;
-        self.packet_resend_cooldown = Duration::from_secs_f32(latency.as_secs_f32() * 1.25);
-        self.reliable
-            .set_packet_resend_cooldown(self.packet_resend_cooldown);
     }
 }

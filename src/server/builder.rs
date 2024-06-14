@@ -1,9 +1,10 @@
 use std::{
     net::{SocketAddr, UdpSocket},
-    sync::Arc,
-    thread::JoinHandle,
+    sync::{Arc, Mutex},
+    thread::JoinHandle, time::Duration,
 };
 
+use ahash::HashMap;
 use ed25519_dalek::SigningKey;
 use mio::{Poll, Waker};
 use rand::random;
@@ -172,6 +173,8 @@ impl ServerBuilder {
         let (recv_queue_tx, recv_queue_rx) =
             crossbeam_channel::bounded(self.packet_receive_queue_size);
         let send_queue = SendQueue::new(self.max_pending_messages_per_connection, waker.clone());
+        
+        let server_info = Arc::new(Mutex::new(ServerInfo::new() ));
 
         // Spawn auth thread
         let _server_cmds_tx = server_cmds_tx.clone();
@@ -183,6 +186,7 @@ impl ServerBuilder {
         // Spawn network thread
         let _auth_cmds_tx = auth_cmds_tx.clone();
         let _send_queue = send_queue.clone();
+        let _server_info = server_info.clone();
         let network_thread = std::thread::spawn(move || {
             let mut state = State::new(
                 poll,
@@ -200,6 +204,7 @@ impl ServerBuilder {
                 self.password_salt,
                 _send_queue,
                 recv_queue_tx,
+                _server_info,
             );
             state.run()
         });
@@ -210,6 +215,7 @@ impl ServerBuilder {
             server_cmds_tx,
             send_queue,
             recv_queue_rx,
+            server_info,
         ))
     }
 }
@@ -239,6 +245,50 @@ pub enum ToSend {
     Disconnect { data: Vec<u8> },
 }
 
+#[derive(Debug)]
+pub struct ServerInfo {
+    per_connection: HashMap<SocketAddr, ConnectionInfo>,
+}
+
+#[derive(Debug)]
+pub struct ConnectionInfo {
+    pub(crate) player_name: String,
+    pub(crate) latency: Duration,
+}
+
+impl ConnectionInfo {
+    pub fn new(player_name: String) -> Self {
+        Self {
+            player_name,
+            latency: Duration::from_secs(0),
+        }
+    }
+
+    pub fn get_latency(&self) -> Duration {
+        self.latency
+    }
+}
+
+impl ServerInfo {
+    pub fn new() -> Self {
+        Self {
+            per_connection: HashMap::default(),
+        }
+    }
+
+    pub fn get_con_info(&self, addr: &SocketAddr) -> Option<&ConnectionInfo> {
+        self.per_connection.get(addr)
+    }
+
+    pub(crate) fn get_con_info_mut(&mut self, addr: &SocketAddr) -> Option<&mut ConnectionInfo> {
+        self.per_connection.get_mut(addr)
+    }
+
+    pub(crate) fn new_con(&mut self, addr: SocketAddr, player_name: String) {
+        self.per_connection.insert(addr, ConnectionInfo::new(player_name));
+    }
+}
+
 pub struct EisenbahnServer {
     auth_thread: Option<JoinHandle<()>>,
     network_thread: Option<JoinHandle<Result<(), std::io::Error>>>,
@@ -247,6 +297,7 @@ pub struct EisenbahnServer {
 
     send_queue: SendQueue,
     recv_queue_rx: crossbeam_channel::Receiver<(SocketAddr, Received)>,
+    server_info: Arc<Mutex<ServerInfo>>
 }
 
 impl EisenbahnServer {
@@ -257,6 +308,7 @@ impl EisenbahnServer {
         server_cmds_tx: crossbeam_channel::Sender<ServerCmd>,
         send_queue: SendQueue,
         recv_queue_rx: crossbeam_channel::Receiver<(SocketAddr, Received)>,
+        server_info: Arc<Mutex<ServerInfo>>,
     ) -> Self {
         Self {
             auth_thread,
@@ -265,6 +317,7 @@ impl EisenbahnServer {
             server_cmds_tx,
             send_queue,
             recv_queue_rx,
+            server_info,
         }
     }
 
@@ -301,5 +354,11 @@ impl EisenbahnServer {
 
     pub fn blocking_send(&self, addr: SocketAddr, to_send: ToSend) -> Result<(), SendError> {
         self.send_queue.blocking_send(addr, to_send)
+    }
+
+    /// NOTE: Locking this mutex blocks the network thread.
+    /// Make sure to lock this mutex as little and as short as possible.
+    pub fn get_info(&self) -> Arc<Mutex<ServerInfo>> {
+        self.server_info.clone()
     }
 }
