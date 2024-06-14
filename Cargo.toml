@@ -34,7 +34,6 @@ siphasher = "1.0.1"
 x25519-dalek = { version = "2.0.1", features = ["reusable_secrets"] }
 strum = { version = "0.26.2", features = ["derive"] }
 strum_macros = "0.26.3"
-ratatui = { version = "0.26.3", features = ["all-widgets"] }
 
 
 
