@@ -199,8 +199,8 @@ impl State {
         loop {
             //TODO: Better timeout handling and waking
             let time_to_wait = match self.events.peek() {
-                Some(e) => e.deadline.saturating_duration_since(Instant::now()),
-                None => Duration::from_micros(20),
+                Some(e) => e.deadline.saturating_duration_since(Instant::now()).max(Duration::from_micros(50)),
+                None => Duration::from_micros(50),
             };
 
             self.poll

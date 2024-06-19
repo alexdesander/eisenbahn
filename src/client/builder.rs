@@ -210,7 +210,7 @@ impl ClientBuilder {
             socket.send(&buf[..1200])?;
 
             // Recv server hello
-            let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200);
+            let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200 + 1);
             socket.set_read_timeout(Some(time_out_time))?;
             let size = match socket.recv(&mut buf) {
                 Ok(size) => size,
@@ -368,7 +368,7 @@ impl ClientBuilder {
             socket.send(&buf[..size])?;
 
             // Recv connection response
-            let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200);
+            let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200 + 1);
             socket.set_read_timeout(Some(time_out_time))?;
             let size = match socket.recv(&mut buf) {
                 Ok(size) => size,
@@ -468,7 +468,7 @@ impl ClientBuilder {
             socket.send(&buf[..tag_offset + 16])?;
 
             // Recv password response
-            let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200);
+            let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200 + 1);
             socket.set_read_timeout(Some(time_out_time))?;
             let size = match socket.recv(&mut buf) {
                 Ok(size) => size,
