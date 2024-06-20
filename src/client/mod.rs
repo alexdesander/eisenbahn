@@ -14,6 +14,7 @@ use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 use crate::common::{
     ack_manager::AckManager,
+    congestion::CongestionController,
     constants::{
         Channel, DisconnectReason, NONCE_DISCONNECT, PACKET_ID_ACK_ONLY, PACKET_ID_DISCONNECT,
         PACKET_ID_LATENCY_DISCOVERY, PACKET_ID_LATENCY_RESPONSE, PACKET_ID_LATENCY_RESPONSE_2,
@@ -101,12 +102,13 @@ pub struct ClientState {
     is_sending: bool,
     last_sent: Instant,
     last_received: Instant,
-    send_cooldown: Duration,
+    base_send_cooldown: u32,
     timeout_duration: Duration,
     last_latency_discovery: Option<(Instant, u32)>,
 
     latency: Duration,
-    packet_resend_cooldown: Duration,
+
+    congestion_controller: CongestionController,
 }
 
 impl ClientState {
@@ -119,6 +121,8 @@ impl ClientState {
         to_send_rx: crossbeam_channel::Receiver<ToSend>,
         received_tx: crossbeam_channel::Sender<Received>,
     ) -> Self {
+        let congestion_controller = CongestionController::new();
+
         Self {
             rng: SmallRng::from_entropy(),
             cmds,
@@ -137,12 +141,13 @@ impl ClientState {
             is_sending: false,
             last_sent: Instant::now(),
             last_received: Instant::now(),
-            send_cooldown: Duration::from_micros(5),
+            base_send_cooldown: congestion_controller.base_send_cooldown,
             timeout_duration: Duration::from_secs(10),
             last_latency_discovery: None,
 
-            latency: Duration::from_millis(100),
-            packet_resend_cooldown: Duration::from_millis(125),
+            latency: congestion_controller.latest_latency,
+
+            congestion_controller,
         }
     }
 
@@ -163,12 +168,14 @@ impl ClientState {
         loop {
             //TODO: Better timeout handling and waking
             let time_to_wait = match self.events.peek() {
-                Some(e) => e.deadline.saturating_duration_since(Instant::now()).max(Duration::from_micros(50)),
+                Some(e) => e
+                    .deadline
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_micros(50)),
                 None => Duration::from_micros(50),
             };
 
-            self.poll
-                .poll(&mut events, Some(time_to_wait))?;
+            self.poll.poll(&mut events, Some(time_to_wait))?;
 
             for event in events.iter() {
                 match event.token() {
@@ -248,7 +255,12 @@ impl ClientState {
         let now = Instant::now();
         let now_tolerance = Duration::from_micros(500);
         loop {
-            if self.events.peek().map(|e| e.deadline > now + now_tolerance).unwrap_or(true) {
+            if self
+                .events
+                .peek()
+                .map(|e| e.deadline > now + now_tolerance)
+                .unwrap_or(true)
+            {
                 break;
             }
             let event = self.events.pop().unwrap().event;
@@ -317,9 +329,13 @@ impl ClientState {
         false
     }
 
+    pub fn send_cooldown(&self, packet_size: u32) -> Duration {
+        Duration::from_millis((self.base_send_cooldown * packet_size) as u64)
+    }
+
     fn start_sending(&mut self) {
         self.is_sending = true;
-        let deadline = self.last_sent + self.send_cooldown;
+        let deadline = self.last_sent + Duration::from_micros(self.base_send_cooldown as u64 * 48);
         self.events.push(TimedEvent {
             deadline,
             event: Event::SendNext,
@@ -327,12 +343,20 @@ impl ClientState {
     }
 
     fn send_next(&mut self) -> Result<(), io::Error> {
-        let result = self.reliable.next(&mut self.buf[0..1200]);
+        if self.congestion_controller.packet_sent() {
+            self.sync_congestion_controller();
+        }
+        let result = self
+            .reliable
+            .next(&mut self.congestion_controller, &mut self.buf[0..1200]);
         match result {
-            Ok(size) => {
+            Ok((size, congestion_updated)) => {
+                if congestion_updated {
+                    self.sync_congestion_controller();
+                }
                 self.socket.send(&self.buf[0..size])?;
                 self.events.push(TimedEvent {
-                    deadline: Instant::now() + self.send_cooldown,
+                    deadline: Instant::now() + self.send_cooldown(size as u32),
                     event: Event::SendNext,
                 });
             }
@@ -670,6 +694,15 @@ impl ClientState {
     }
 
     fn set_latency(&mut self, latency: Duration) {
-        self.latency = latency;
+        if self.congestion_controller.update_latency(latency) {
+            self.sync_congestion_controller();
+        }
+    }
+
+    fn sync_congestion_controller(&mut self) {
+        self.base_send_cooldown = self.congestion_controller.base_send_cooldown;
+        self.latency = self.congestion_controller.latest_latency;
+        self.reliable
+            .sync_congestion_controller(&mut self.congestion_controller);
     }
 }

@@ -1,8 +1,8 @@
-use std::{rc::Rc, time::Duration};
+use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use channel::{ReliableChannel, ReliableChannelId};
 
-use super::encryption::Encryption;
+use super::{congestion::CongestionController, encryption::Encryption};
 
 mod assembler;
 pub mod channel;
@@ -38,13 +38,19 @@ impl ReliableChannels {
         self.channels[channel.to_index()].handle(buf)
     }
 
-    pub fn next(&mut self, buf: &mut [u8]) -> Result<usize, Option<Duration>> {
+    /// Returns (length of the packet, congestion controller updated) or the duration to wait until the next packet can be sent.
+    pub fn next(
+        &mut self,
+        congestion_controller: &mut CongestionController,
+        buf: &mut [u8],
+    ) -> Result<(usize, bool), Option<Duration>> {
         let mut cool_downs = [None, None, None, None];
         for _ in 0..4 {
             self.round_robin = self.round_robin.round_robin();
-            let result = self.channels[self.round_robin.to_index()].next(buf);
+            let result =
+                self.channels[self.round_robin.to_index()].next(congestion_controller, buf);
             match result {
-                Ok(size) => return Ok(size),
+                Ok((size, congestion_updated)) => return Ok((size, congestion_updated)),
                 Err(Some(cool_down)) => cool_downs[self.round_robin.to_index()] = Some(cool_down),
                 Err(None) => continue,
             }
@@ -61,9 +67,9 @@ impl ReliableChannels {
         self.channels[channel.to_index()].ack(oldest, ack_field);
     }
 
-    pub fn set_packet_resend_cooldown(&mut self, cooldown: Duration) {
+    pub fn sync_congestion_controller(&mut self, congestion_controller: &mut CongestionController) {
         for channel in self.channels.iter_mut() {
-            channel.set_packet_resend_cooldown(cooldown);
+            channel.sync_congestion_controller(congestion_controller);
         }
     }
 }

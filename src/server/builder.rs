@@ -1,7 +1,8 @@
 use std::{
     net::{SocketAddr, UdpSocket},
     sync::{Arc, Mutex},
-    thread::JoinHandle, time::Duration,
+    thread::JoinHandle,
+    time::Duration,
 };
 
 use ahash::HashMap;
@@ -173,8 +174,8 @@ impl ServerBuilder {
         let (recv_queue_tx, recv_queue_rx) =
             crossbeam_channel::bounded(self.packet_receive_queue_size);
         let send_queue = SendQueue::new(self.max_pending_messages_per_connection, waker.clone());
-        
-        let server_info = Arc::new(Mutex::new(ServerInfo::new() ));
+
+        let server_info = Arc::new(Mutex::new(ServerInfo::new()));
 
         // Spawn auth thread
         let _server_cmds_tx = server_cmds_tx.clone();
@@ -285,7 +286,8 @@ impl ServerInfo {
     }
 
     pub(crate) fn new_con(&mut self, addr: SocketAddr, player_name: String) {
-        self.per_connection.insert(addr, ConnectionInfo::new(player_name));
+        self.per_connection
+            .insert(addr, ConnectionInfo::new(player_name));
     }
 }
 
@@ -297,7 +299,7 @@ pub struct EisenbahnServer {
 
     send_queue: SendQueue,
     recv_queue_rx: crossbeam_channel::Receiver<(SocketAddr, Received)>,
-    server_info: Arc<Mutex<ServerInfo>>
+    server_info: Arc<Mutex<ServerInfo>>,
 }
 
 impl EisenbahnServer {

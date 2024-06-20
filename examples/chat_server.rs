@@ -1,7 +1,7 @@
 // DISCLAIMER: THIS CODE WAS BUILT IN A RUSH TO TEST THE PROTOTYPE
 // THIS DOES NOT REPRESENT THE QUALITY OF MY CODE OR THE EISENBAHN PROJECT
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use ahash::HashMap;
 use ed25519_dalek::SigningKey;
@@ -37,13 +37,15 @@ impl TerribleNetworkConditions {
 
 impl NetworkConditions for TerribleNetworkConditions {
     fn simulate_packet_loss(&mut self, _packet_size: usize) -> bool {
-        // 25% packet loss
-        self.rng.gen_bool(0.25)
+        // 4% packet loss
+        self.rng.gen_bool(0.04)
+        //false
     }
 
     fn simulate_packet_latency(&mut self, _packet_size: usize) -> std::time::Duration {
         // 80-120ms latency
         std::time::Duration::from_millis(self.rng.gen_range(80..120))
+        //Duration::ZERO
     }
 }
 

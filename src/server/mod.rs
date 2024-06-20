@@ -199,12 +199,14 @@ impl State {
         loop {
             //TODO: Better timeout handling and waking
             let time_to_wait = match self.events.peek() {
-                Some(e) => e.deadline.saturating_duration_since(Instant::now()).max(Duration::from_micros(50)),
+                Some(e) => e
+                    .deadline
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_micros(50)),
                 None => Duration::from_micros(50),
             };
 
-            self.poll
-                .poll(&mut events, Some(time_to_wait))?;
+            self.poll.poll(&mut events, Some(time_to_wait))?;
 
             for event in events.iter() {
                 match event.token() {
@@ -355,7 +357,12 @@ impl State {
         let now = Instant::now();
         let now_tolerance = Duration::from_micros(500);
         loop {
-            if self.events.peek().map(|e| e.deadline > now + now_tolerance).unwrap_or(true) {
+            if self
+                .events
+                .peek()
+                .map(|e| e.deadline > now + now_tolerance)
+                .unwrap_or(true)
+            {
                 break;
             }
             let event = self.events.pop().unwrap().event;
@@ -377,11 +384,12 @@ impl State {
                             Ok(size) => {
                                 self.socket.send_to(addr, &self.buf[0..size])?;
                                 self.events.push(TimedEvent {
-                                    deadline: Instant::now() + con.send_cool_down(),
+                                    deadline: Instant::now() + con.send_cooldown(size as u32),
                                     event: Event::Send(addr),
                                 });
                             }
                             Err(Some(next_send)) => {
+                                println!("Next send: {:?}", next_send);
                                 self.events.push(TimedEvent {
                                     deadline: Instant::now() + next_send,
                                     event: Event::Send(addr),
@@ -400,7 +408,7 @@ impl State {
                         if now.duration_since(con.last_received()) > self.timeout_duration {
                             self.events.push(TimedEvent {
                                 deadline: now
-                                    + con.send_cool_down()
+                                    + con.send_cooldown(24)
                                     + Duration::from_millis(self.rng.gen_range(0..150)),
                                 event: Event::Disconnect(
                                     *addr,
@@ -519,7 +527,12 @@ impl State {
         let Some(size) = con.handle_latency_response(&mut self.buf[..size]) else {
             return false;
         };
-        self.server_info.lock().unwrap().get_con_info_mut(&addr).unwrap().latency = con.latency;
+        self.server_info
+            .lock()
+            .unwrap()
+            .get_con_info_mut(&addr)
+            .unwrap()
+            .latency = con.latency();
         if self.socket.send_to(addr, &self.buf[..size]).is_err() {
             return true;
         }
@@ -853,7 +866,10 @@ impl State {
                     addr,
                     Connection::new(addr, player_name.clone(), Rc::new(encryption)),
                 );
-                self.server_info.lock().unwrap().new_con(addr, player_name.clone());
+                self.server_info
+                    .lock()
+                    .unwrap()
+                    .new_con(addr, player_name.clone());
                 if !self.is_checking_for_timeouts {
                     self.is_checking_for_timeouts = true;
                     self.events.push(TimedEvent {
@@ -939,7 +955,10 @@ impl State {
                 addr,
                 Connection::new(addr, player_name.clone(), Rc::new(encryption)),
             );
-            self.server_info.lock().unwrap().new_con(addr, player_name.clone());
+            self.server_info
+                .lock()
+                .unwrap()
+                .new_con(addr, player_name.clone());
             if !self.is_checking_for_timeouts {
                 self.is_checking_for_timeouts = true;
                 self.events.push(TimedEvent {

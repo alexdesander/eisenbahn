@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::BinaryHeap,
     rc::Rc,
     time::{Duration, Instant},
@@ -6,7 +7,7 @@ use std::{
 
 use ahash::HashSet;
 
-use crate::common::encryption::Encryption;
+use crate::common::{congestion::CongestionController, encryption::Encryption};
 
 use super::{assembler::PacketAssembler, disassembler::MessageDisassembler};
 
@@ -130,22 +131,21 @@ impl ReliableChannel {
         }
     }
 
-    pub fn set_max_in_flight(&mut self, max_in_flight: usize) {
-        assert!(max_in_flight > 0 && max_in_flight < 255 * 8 + 1);
-        self.max_in_flight = max_in_flight;
-        self.assembler.set_max_in_flight(max_in_flight);
-    }
-
-    pub fn set_packet_resend_cooldown(&mut self, cooldown: Duration) {
-        self.packet_resend_cooldown = cooldown;
-    }
-
     pub fn get_ack(&self) -> (u64, &[u8]) {
         self.assembler.get_ack()
     }
 
     pub fn push(&mut self, message: Vec<u8>) {
         self.disassembler.insert(message);
+    }
+
+    pub fn sync_with_congestion_controller(
+        &mut self,
+        congestion_controller: &CongestionController,
+    ) {
+        self.max_in_flight = congestion_controller.max_in_flight as usize;
+        self.packet_resend_cooldown =
+            Duration::from_millis(congestion_controller.packet_resend_cooldown as u64);
     }
 
     /// TODO: Optimize this
@@ -164,8 +164,12 @@ impl ReliableChannel {
     }
 
     /// Fully builds a packet to be sent.
-    /// Returns the length of the packet or the duration to wait until the next packet can be sent.
-    pub fn next(&mut self, buf: &mut [u8]) -> Result<usize, Option<Duration>> {
+    /// Returns (length of the packet, congestion controller updated) or the duration to wait until the next packet can be sent.
+    pub fn next(
+        &mut self,
+        congestion_controller: &mut CongestionController,
+        buf: &mut [u8],
+    ) -> Result<(usize, bool), Option<Duration>> {
         // Remove acked packets
         self.in_flight.retain(|in_flight| {
             if in_flight.id < self.acked_cutoff {
@@ -180,7 +184,7 @@ impl ReliableChannel {
             target_size -= 16;
         }
         target_size -= 1 + 5 + (self.max_in_flight + 7) / 8 + 3;
-        for _ in 0..(self.max_in_flight - self.in_flight.len()) {
+        for _ in 0..(self.max_in_flight.saturating_sub(self.in_flight.len())) {
             let Some(mut fragment) = self.disassembler.next(target_size) else {
                 break;
             };
@@ -206,10 +210,15 @@ impl ReliableChannel {
             if in_flight.last_sent.map_or(true, |l| {
                 now.saturating_duration_since(l) > self.packet_resend_cooldown
             }) {
+                let congestion_updated = in_flight.last_sent.is_some();
+                if congestion_updated {
+                    congestion_controller.packet_lost();
+                }
                 let (oldest_unacked, ack_bitfield) = self.assembler.get_ack();
                 let mut fragment = self.in_flight.pop().unwrap();
                 let ack_size = ((self.max_in_flight + 7) / 8)
                     .min(1200 - fragment.encrypted_data.len() - 6 - 1 - 5 - 3 - 16);
+                let ack_size = ack_size.min(ack_bitfield.len());
                 buf[0] = self.id.to_u8() << 4;
                 buf[0] |= 0b0000_1000;
                 buf[1..6].copy_from_slice(&fragment.id.to_le_bytes()[..5]);
@@ -230,7 +239,7 @@ impl ReliableChannel {
                 }
                 fragment.last_sent = Some(now);
                 self.in_flight.push(fragment);
-                return Ok(size);
+                return Ok((size, congestion_updated));
             } else {
                 return Err(Some(self.packet_resend_cooldown.saturating_sub(
                     now.saturating_duration_since(in_flight.last_sent.unwrap()),
@@ -290,7 +299,13 @@ impl ReliableChannel {
                 self.assembler.add_fragment(id, data);
             }
         }
-
         Ok(self.assembler.assemble())
+    }
+
+    pub fn sync_congestion_controller(&mut self, congestion_controller: &mut CongestionController) {
+        self.packet_resend_cooldown =
+            Duration::from_millis(congestion_controller.packet_resend_cooldown as u64);
+        self.max_in_flight = congestion_controller.max_in_flight as usize;
+        self.assembler.set_max_in_flight(self.max_in_flight);
     }
 }

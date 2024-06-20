@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::BinaryHeap,
     io::Write,
     net::SocketAddr,
@@ -11,6 +12,7 @@ use byteorder::WriteBytesExt;
 use crate::{
     common::{
         ack_manager::AckManager,
+        congestion::CongestionController,
         encryption::Encryption,
         reliable::{channel::ReliableChannelId, ReliableChannels},
     },
@@ -32,16 +34,20 @@ pub struct Connection {
     has_ack_event_queued: bool,
     ack_only_delay: Duration,
     is_currently_sending: bool,
-    send_cool_down: Duration,
+    base_send_cooldown: u32, // If sending 1 byte (in microseconds)
     last_received: Instant,
     last_latency_discovery: Option<(Instant, u32)>,
+    latency: Duration,
 
-    pub latency: Duration,
-    packet_resend_cooldown: Duration,
+    congestion_controller: CongestionController,
 }
 
 impl Connection {
     pub fn new(addr: SocketAddr, player_name: String, encryption: Rc<Encryption>) -> Self {
+        let congestion_controller = CongestionController::new();
+        let base_send_cooldown = congestion_controller.base_send_cooldown;
+        let latency = congestion_controller.latest_latency;
+
         Self {
             addr,
             player_name,
@@ -51,12 +57,11 @@ impl Connection {
             has_ack_event_queued: false,
             ack_only_delay: Duration::from_millis(30),
             is_currently_sending: false,
-            send_cool_down: Duration::from_micros(1),
+            base_send_cooldown,
             last_received: Instant::now(),
             last_latency_discovery: None,
-            // TODO: Discover latency at the connection building
-            latency: Duration::from_millis(100),
-            packet_resend_cooldown: Duration::from_millis(125),
+            latency,
+            congestion_controller,
         }
     }
 
@@ -64,8 +69,12 @@ impl Connection {
         self.is_currently_sending
     }
 
-    pub fn send_cool_down(&self) -> Duration {
-        self.send_cool_down
+    pub fn send_cooldown(&self, packet_size: u32) -> Duration {
+        Duration::from_millis((self.base_send_cooldown * packet_size) as u64)
+    }
+
+    pub fn latency(&self) -> Duration {
+        self.latency
     }
 
     pub fn last_received(&self) -> Instant {
@@ -85,7 +94,7 @@ impl Connection {
         assert!(!self.is_currently_sending);
         self.is_currently_sending = true;
         events.push(TimedEvent {
-            deadline: Instant::now() + self.send_cool_down,
+            deadline: Instant::now() + self.send_cooldown(24),
             event: Event::Send(self.addr),
         });
     }
@@ -322,7 +331,18 @@ impl Connection {
     }
 
     pub fn build_next_payload(&mut self, buf: &mut [u8]) -> Result<usize, Option<Duration>> {
-        self.reliable.next(buf)
+        if self.congestion_controller.packet_sent() {
+            self.sync_congestion_controller();
+        }
+        match self.reliable.next(&mut self.congestion_controller, buf) {
+            Ok((size, congestion_updated)) => {
+                if congestion_updated {
+                    self.sync_congestion_controller();
+                }
+                Ok(size)
+            }
+            Err(cool_down) => Err(cool_down),
+        }
     }
 
     pub fn build_disconnect(
@@ -352,6 +372,11 @@ impl Connection {
         buf[1..5].copy_from_slice(&time_stamp.to_le_bytes());
         let siphash = self.encryption.siphash_out(&buf[1..5]);
         buf[5..9].copy_from_slice(&siphash.to_le_bytes()[..4]);
+        if self.last_latency_discovery.is_some() {
+            if self.congestion_controller.packet_lost() {
+                self.sync_congestion_controller();
+            }
+        }
         self.last_latency_discovery = Some((Instant::now(), time_stamp));
         9
     }
@@ -394,6 +419,15 @@ impl Connection {
     }
 
     fn set_latency(&mut self, latency: Duration) {
-        self.latency = latency;
+        if self.congestion_controller.update_latency(latency) {
+            self.sync_congestion_controller();
+        }
+    }
+
+    fn sync_congestion_controller(&mut self) {
+        self.base_send_cooldown = self.congestion_controller.base_send_cooldown;
+        self.latency = self.congestion_controller.latest_latency;
+        self.reliable
+            .sync_congestion_controller(&mut self.congestion_controller);
     }
 }
