@@ -124,22 +124,26 @@ impl CongestionController {
         }
         self.last_packet_loss_index = index;
 
+        if self.accelerate_fast && self.last_accelerate.elapsed().as_millis() > 50 {
+            self.fast_accelerate();
+            return true;
+        }
+
         if self.last_accelerate.elapsed().as_millis() > 1500 {
-            if self.accelerate_fast {
-                self.fast_accelerate();
+            if self.last_decelerate.elapsed().as_secs() > 8 {
+                self.accelerate();
                 return true;
-            } else {
-                if self.last_decelerate.elapsed().as_secs() > 8 {
-                    self.accelerate();
-                    return true;
-                }
             }
         }
         false
     }
 
     fn fast_accelerate(&mut self) {
-        self.target_bandwidth += 38400 * 4;
+        self.target_bandwidth *= 2;
+        if self.target_bandwidth > 33554432 { // 32MiB/s
+            self.target_bandwidth = self.target_bandwidth.min(33554432); // 32MiB/s
+            self.accelerate_fast = false;
+        }
         self.derive();
         if self.accelerated_once {
             self.accelerated_once = false;
@@ -149,7 +153,7 @@ impl CongestionController {
 
     fn accelerate(&mut self) {
         self.target_bandwidth += 3600 * 2;
-        self.target_bandwidth = self.target_bandwidth.min(16777216); // 16MiB/s
+        self.target_bandwidth = self.target_bandwidth.min(33554432); // 32MiB/s
         self.derive();
         if self.accelerated_once {
             self.accelerated_once = false;

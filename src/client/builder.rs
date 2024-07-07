@@ -329,44 +329,46 @@ impl ClientBuilder {
         let client_x25519_pub_key = PublicKey::from(&client_x25519_key);
         let encryption: Encryption;
         let mut password_salt = [0u8; 16];
+
+        // !! We don't resend the connection request because that would desync our encryption keys !!
+        // Send connection request
+        buf[0] = PACKET_ID_CONNECTION_REQUEST << 4;
+        // We keep everything from time stamp to server siphash
+        let mut b = &mut buf[58..];
+        b.write_u32::<LittleEndian>((challenge << 1) ^ challenge)?;
+        b.write_all(client_x25519_pub_key.as_bytes())?;
+        let size;
+        match auth_kind {
+            AuthenticationKind::None => {
+                let auth = self.none_authentication.as_ref().unwrap();
+                b.write(auth.username.as_bytes())?;
+                size = 94 + auth.username.len();
+            }
+            AuthenticationKind::Key => {
+                let auth = self.key_authentication.as_ref().unwrap();
+                b.write(auth.username.as_bytes())?;
+                b.write(auth.key.as_bytes())?;
+                let offset = 126 + auth.username.len();
+                let signature = auth.key.sign(&buf[..offset]);
+                buf[offset..offset + 64].copy_from_slice(&signature.to_bytes());
+                size = offset + 64;
+            }
+            AuthenticationKind::CA => {
+                let auth = self.ca_authentication.as_ref().unwrap();
+                b.write(&auth.ticket)?;
+                size = 126;
+            }
+            AuthenticationKind::Password => {
+                size = 94;
+            }
+        }
+        socket.send(&buf[..size])?;
+
         loop {
             let time_left = self.handshake_timeout.saturating_sub(start.elapsed());
             if time_left == Duration::ZERO {
                 return Err(ConnectError::TimedOut);
             }
-            // Send connection request
-            buf[0] = PACKET_ID_CONNECTION_REQUEST << 4;
-            // We keep everything from time stamp to server siphash
-            let mut b = &mut buf[58..];
-            b.write_u32::<LittleEndian>((challenge << 1) ^ challenge)?;
-            b.write_all(client_x25519_pub_key.as_bytes())?;
-            let size;
-            match auth_kind {
-                AuthenticationKind::None => {
-                    let auth = self.none_authentication.as_ref().unwrap();
-                    b.write(auth.username.as_bytes())?;
-                    size = 94 + auth.username.len();
-                }
-                AuthenticationKind::Key => {
-                    let auth = self.key_authentication.as_ref().unwrap();
-                    b.write(auth.username.as_bytes())?;
-                    b.write(auth.key.as_bytes())?;
-                    let offset = 126 + auth.username.len();
-                    let signature = auth.key.sign(&buf[..offset]);
-                    buf[offset..offset + 64].copy_from_slice(&signature.to_bytes());
-                    size = offset + 64;
-                }
-                AuthenticationKind::CA => {
-                    let auth = self.ca_authentication.as_ref().unwrap();
-                    b.write(&auth.ticket)?;
-                    size = 126;
-                }
-                AuthenticationKind::Password => {
-                    size = 94;
-                }
-            }
-            socket.send(&buf[..size])?;
-
             // Recv connection response
             let time_out_time = Duration::from_millis(time_left.as_millis() as u64 % 1200 + 1);
             socket.set_read_timeout(Some(time_out_time))?;

@@ -389,7 +389,6 @@ impl State {
                                 });
                             }
                             Err(Some(next_send)) => {
-                                println!("Next send: {:?}", next_send);
                                 self.events.push(TimedEvent {
                                     deadline: Instant::now() + next_send,
                                     event: Event::Send(addr),
