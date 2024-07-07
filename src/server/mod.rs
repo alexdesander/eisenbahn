@@ -372,7 +372,7 @@ impl State {
                 }
                 Event::SendAckOnly(addr) => {
                     if let Some(con) = self.connections.get_mut(&addr) {
-                        let size = con.build_ack_only(&mut self.buf[..1200], &mut self.events);
+                        let size = con.build_ack_only(&mut self.buf[..1200]);
                         if self.socket.send_to(addr, &self.buf[..size]).is_err() {
                             return Ok(true);
                         }

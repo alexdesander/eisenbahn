@@ -140,7 +140,8 @@ impl CongestionController {
 
     fn fast_accelerate(&mut self) {
         self.target_bandwidth *= 2;
-        if self.target_bandwidth > 33554432 { // 32MiB/s
+        if self.target_bandwidth > 33554432 {
+            // 32MiB/s
             self.target_bandwidth = self.target_bandwidth.min(33554432); // 32MiB/s
             self.accelerate_fast = false;
         }

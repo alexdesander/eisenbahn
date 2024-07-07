@@ -376,56 +376,7 @@ impl ClientState {
     fn build_ack_only(&mut self) -> usize {
         assert!(self.has_ack_event_queued);
         self.has_ack_event_queued = false;
-        self.buf[0] = PACKET_ID_ACK_ONLY << 4;
-        let reliable0_needs_ack = self.ack_manager.needs_ack(Channel::Reliable0);
-        let reliable1_needs_ack = self.ack_manager.needs_ack(Channel::Reliable0);
-        let reliable2_needs_ack = self.ack_manager.needs_ack(Channel::Reliable0);
-        let reliable3_needs_ack = self.ack_manager.needs_ack(Channel::Reliable0);
-        if reliable0_needs_ack {
-            self.buf[0] |= 1 << 3;
-        }
-        if reliable1_needs_ack {
-            self.buf[0] |= 1 << 2;
-        }
-        if reliable2_needs_ack {
-            self.buf[0] |= 1 << 1;
-        }
-        if reliable3_needs_ack {
-            self.buf[0] |= 1;
-        }
-        let mut b = &mut self.buf[2..];
-        let mut offset = 2;
-        if reliable0_needs_ack {
-            let (oldest, field) = self.reliable.get_ack(ReliableChannelId::Reliable0);
-            b.write_u8(field.len() as u8).unwrap();
-            b.write_all(&oldest.to_le_bytes()[..5]).unwrap();
-            b.write_all(field).unwrap();
-            offset += 6 + field.len();
-        }
-        if reliable1_needs_ack {
-            let (oldest, field) = self.reliable.get_ack(ReliableChannelId::Reliable1);
-            b.write_u8(field.len() as u8).unwrap();
-            b.write_all(&oldest.to_le_bytes()[..5]).unwrap();
-            b.write_all(field).unwrap();
-            offset += 6 + field.len();
-        }
-        if reliable2_needs_ack {
-            let (oldest, field) = self.reliable.get_ack(ReliableChannelId::Reliable2);
-            b.write_u8(field.len() as u8).unwrap();
-            b.write_all(&oldest.to_le_bytes()[..5]).unwrap();
-            b.write_all(field).unwrap();
-            offset += 6 + field.len();
-        }
-        if reliable3_needs_ack {
-            let (oldest, field) = self.reliable.get_ack(ReliableChannelId::Reliable3);
-            b.write_u8(field.len() as u8).unwrap();
-            b.write_all(&oldest.to_le_bytes()[..5]).unwrap();
-            b.write_all(field).unwrap();
-            offset += 6 + field.len();
-        }
-        let siphash = self.encryption.siphash_out(&self.buf[0..offset]);
-        self.buf[offset..offset + 3].copy_from_slice(&siphash.to_le_bytes()[..3]);
-        offset + 3
+        self.reliable.build_ack_only(&mut self.encryption, &mut self.ack_manager, &mut self.buf[0..1200])
     }
 
     fn handle_ack_only(&mut self, size: usize) {
